@@ -4352,7 +4352,10 @@ class SHAKEuq:
                 plt.close(fig)
     
         return df
-    
+
+
+
+
 
 
     # ======================================================================
@@ -9795,3 +9798,527 @@ class SHAKEuq:
                 plt.close(fig)
     
         return df
+
+
+    def uq_sim_generate_grids(
+        self,
+        version_list,
+        *,
+        center_lat=0.0,
+        center_lon=0.0,
+        nlat=61,
+        nlon=61,
+        extent_km=200.0,
+        imts=("MMI", "PGA"),
+        base_mmi=7.5,
+        base_pga_pctg=50.0,
+        seed=1234,
+        version_sigma_drop=0.15,
+        version_mean_shift=0.08,
+    ):
+        import numpy as np
+
+        versions = sorted([int(v) for v in list(version_list)])
+        if not versions:
+            raise ValueError("version_list must be non-empty.")
+
+        nlat = int(nlat)
+        nlon = int(nlon)
+        if nlat < 3 or nlon < 3:
+            raise ValueError("nlat/nlon must be >= 3.")
+
+        extent_km = float(extent_km)
+        lat_span = extent_km / 111.0
+        lon_span = extent_km / max(1e-6, (111.0 * np.cos(np.deg2rad(center_lat))))
+
+        lats_1d = np.linspace(float(center_lat) - lat_span, float(center_lat) + lat_span, nlat)
+        lons_1d = np.linspace(float(center_lon) - lon_span, float(center_lon) + lon_span, nlon)
+        lon2d, lat2d = np.meshgrid(lons_1d, lats_1d)
+
+        dist_km = self._uq_haversine_km(lat2d, lon2d, float(center_lat), float(center_lon))
+
+        rng = np.random.RandomState(int(seed))
+
+        def _smooth_field(field, n_iter=3):
+            f = np.asarray(field, dtype=float)
+            for _ in range(int(n_iter)):
+                pad = np.pad(f, ((1, 1), (1, 1)), mode="edge")
+                f = (
+                    pad[:-2, :-2] + pad[:-2, 1:-1] + pad[:-2, 2:] +
+                    pad[1:-1, :-2] + pad[1:-1, 1:-1] + pad[1:-1, 2:] +
+                    pad[2:, :-2] + pad[2:, 1:-1] + pad[2:, 2:]
+                ) / 9.0
+            return f
+
+        base_noise = _smooth_field(rng.normal(0.0, 0.35, size=dist_km.shape), n_iter=4)
+        mmi_base = float(base_mmi) - 1.1 * np.log10(1.0 + dist_km / 10.0) - 0.0025 * dist_km + base_noise
+        mmi_base = np.clip(mmi_base, 1.0, 9.8)
+
+        pga_base = float(base_pga_pctg) * np.exp(-dist_km / 35.0) + 0.3
+        pga_base *= (1.0 + 0.10 * _smooth_field(rng.normal(0.0, 0.6, size=dist_km.shape), n_iter=2))
+        pga_base = np.clip(pga_base, 0.05, None)
+
+        unified = {}
+        imt_list = [str(i).upper().strip() for i in imts]
+        nver = max(1, len(versions))
+        for idx, v in enumerate(versions):
+            vfrac = 0.0 if nver == 1 else float(idx) / float(nver - 1)
+            mean_shift = float(version_mean_shift) * vfrac
+            sigma_scale = max(0.45, 1.0 - float(version_sigma_drop) * vfrac)
+            v_rng = np.random.RandomState(int(seed) + 1000 + idx)
+            v_noise = _smooth_field(v_rng.normal(0.0, 0.08, size=dist_km.shape), n_iter=2)
+
+            mmi_v = np.clip(mmi_base + mean_shift * np.exp(-dist_km / 60.0) + v_noise, 1.0, 9.9)
+            pga_v = np.clip(pga_base * (1.0 + 0.04 * vfrac) * (1.0 + 0.05 * v_noise), 0.05, None)
+
+            sigma_base = 0.55 + 0.0045 * dist_km
+            sigma_total = np.clip(sigma_base * sigma_scale, 0.35, None)
+
+            uv = {
+                "version": int(v),
+                "unified_mean": {},
+                "unified_sigma_prior_total": {},
+                "unified_vs30": np.full(dist_km.shape, np.nan, dtype=float),
+                "aligned_to_unified": True,
+                "unified_mean_units": {},
+                "unified_sigma_units": {},
+                "interp_method": "synthetic",
+            }
+            if "MMI" in imt_list:
+                uv["unified_mean"]["MMI"] = np.asarray(mmi_v, dtype=float)
+                uv["unified_sigma_prior_total"]["MMI"] = np.asarray(sigma_total, dtype=float)
+                uv["unified_mean_units"]["MMI"] = "MMI"
+                uv["unified_sigma_units"]["MMI"] = "MMI"
+            if "PGA" in imt_list:
+                uv["unified_mean"]["PGA"] = np.asarray(pga_v, dtype=float)
+                uv["unified_sigma_prior_total"]["PGA"] = np.asarray(sigma_total, dtype=float)
+                uv["unified_mean_units"]["PGA"] = "%g"
+                uv["unified_sigma_units"]["PGA"] = "ln"
+            unified[int(v)] = uv
+
+        spec = {
+            "lat_min": float(np.min(lats_1d)),
+            "lat_max": float(np.max(lats_1d)),
+            "lon_min": float(np.min(lons_1d)),
+            "lon_max": float(np.max(lons_1d)),
+            "dlat": float(np.mean(np.diff(lats_1d))),
+            "dlon": float(np.mean(np.diff(lons_1d))),
+            "nlat": int(nlat),
+            "nlon": int(nlon),
+        }
+
+        return {
+            "versions": versions,
+            "unified_spec": spec,
+            "unified_axes": {"lats_1d": lats_1d, "lons_1d": lons_1d, "lat2d": lat2d, "lon2d": lon2d},
+            "versions_unified": unified,
+            "imts": imt_list,
+        }
+
+
+    def uq_sim_generate_observations(
+        self,
+        sim_grids,
+        *,
+        seed=2024,
+        n_seismic_base=12,
+        n_dyfi_base=18,
+        n_cdi_stride=2,
+        dyfi_from_version=2,
+        cdi_from_version=3,
+        seismic_noise=0.08,
+        dyfi_noise=0.35,
+        cdi_noise=0.18,
+    ):
+        import numpy as np
+
+        rng = np.random.RandomState(int(seed))
+        versions = sim_grids["versions"]
+        axes = sim_grids["unified_axes"]
+        lat2d = np.asarray(axes["lat2d"], dtype=float)
+        lon2d = np.asarray(axes["lon2d"], dtype=float)
+
+        mmi_grids = {v: sim_grids["versions_unified"][v]["unified_mean"].get("MMI", None) for v in versions}
+        pga_grids = {v: sim_grids["versions_unified"][v]["unified_mean"].get("PGA", None) for v in versions}
+
+        nlat, nlon = lat2d.shape
+        grid_indices = np.arange(nlat * nlon)
+
+        obs_by_version = {}
+        nver = max(1, len(versions))
+        for idx, v in enumerate(versions):
+            vfrac = 0.0 if nver == 1 else float(idx) / float(nver - 1)
+
+            n_seis = int(max(4, round(n_seismic_base * (0.6 + 0.8 * vfrac))))
+            n_dyfi = int(max(0, round(n_dyfi_base * (0.3 + 1.0 * vfrac))))
+
+            pick_seis = rng.choice(grid_indices, size=min(n_seis, grid_indices.size), replace=False)
+            pick_dyfi = rng.choice(grid_indices, size=min(n_dyfi, grid_indices.size), replace=False)
+
+            obs_seismic = []
+            pga_grid = pga_grids.get(v, None)
+            for ind in pick_seis:
+                i = int(ind // nlon)
+                j = int(ind % nlon)
+                pga_val = float(pga_grid[i, j]) if pga_grid is not None else np.nan
+                if not np.isfinite(pga_val):
+                    continue
+                val = float(pga_val + rng.normal(0.0, seismic_noise))
+                obs_seismic.append(
+                    {
+                        "lat": float(lat2d[i, j]),
+                        "lon": float(lon2d[i, j]),
+                        "value": float(max(0.01, val)),
+                        "imt": "PGA",
+                        "unit": "%g",
+                        "w": 1.0,
+                        "source": "stationlist",
+                        "type": "instrumented",
+                        "sigma_obs": float(max(1e-3, seismic_noise)),
+                    }
+                )
+
+            obs_intensity_stationlist = []
+            mmi_grid = mmi_grids.get(v, None)
+            if int(v) >= int(dyfi_from_version):
+                for ind in pick_dyfi:
+                    i = int(ind // nlon)
+                    j = int(ind % nlon)
+                    mmi_val = float(mmi_grid[i, j]) if mmi_grid is not None else np.nan
+                    if not np.isfinite(mmi_val):
+                        continue
+                    val = float(mmi_val + rng.normal(0.0, dyfi_noise))
+                    nresp = int(max(1, round(5 + 20 * rng.rand())))
+                    obs_intensity_stationlist.append(
+                        {
+                            "lat": float(lat2d[i, j]),
+                            "lon": float(lon2d[i, j]),
+                            "value": float(np.clip(val, 1.0, 10.0)),
+                            "w": 1.0,
+                            "source": "dyfi_stationlist",
+                            "type": "dyfi_stationlist",
+                            "nresp": nresp,
+                            "stddev": float(max(0.05, dyfi_noise)),
+                            "sigma_obs": float(max(0.05, dyfi_noise)),
+                        }
+                    )
+
+            obs_intensity_cdi = []
+            if int(v) >= int(cdi_from_version):
+                stride = int(max(1, n_cdi_stride))
+                for i in range(0, nlat, stride):
+                    for j in range(0, nlon, stride):
+                        mmi_val = float(mmi_grid[i, j]) if mmi_grid is not None else np.nan
+                        if not np.isfinite(mmi_val):
+                            continue
+                        val = float(mmi_val + rng.normal(0.0, cdi_noise))
+                        nresp = int(max(1, round(10 + 30 * rng.rand())))
+                        obs_intensity_cdi.append(
+                            {
+                                "lat": float(lat2d[i, j]),
+                                "lon": float(lon2d[i, j]),
+                                "value": float(np.clip(val, 1.0, 10.0)),
+                                "w": 1.0,
+                                "source": "dyfi_cdi",
+                                "type": "dyfi_cdi",
+                                "nresp": nresp,
+                                "stddev": float(max(0.05, cdi_noise)),
+                                "sigma_obs": float(max(0.05, cdi_noise)),
+                            }
+                        )
+
+            obs_by_version[int(v)] = {
+                "obs_seismic": obs_seismic,
+                "obs_intensity_stationlist": obs_intensity_stationlist,
+                "obs_intensity_cdi": obs_intensity_cdi,
+                "summary": {
+                    "counts": {
+                        "obs_seismic": len(obs_seismic),
+                        "obs_intensity_stationlist": len(obs_intensity_stationlist),
+                        "obs_intensity_cdi": len(obs_intensity_cdi),
+                    }
+                },
+            }
+
+        return obs_by_version
+
+
+    def uq_sim_install_state(
+        self,
+        version_list,
+        *,
+        event_id="SYNTHETIC",
+        imts=("MMI", "PGA"),
+        center_lat=0.0,
+        center_lon=0.0,
+        nlat=61,
+        nlon=61,
+        extent_km=200.0,
+        seed=1234,
+        dyfi_from_version=2,
+        cdi_from_version=3,
+    ):
+        import numpy as np
+        from pathlib import Path
+
+        sim = self.uq_sim_generate_grids(
+            version_list,
+            center_lat=center_lat,
+            center_lon=center_lon,
+            nlat=nlat,
+            nlon=nlon,
+            extent_km=extent_km,
+            imts=imts,
+            seed=seed,
+        )
+        obs_by_version = self.uq_sim_generate_observations(
+            sim,
+            seed=int(seed) + 77,
+            dyfi_from_version=dyfi_from_version,
+            cdi_from_version=cdi_from_version,
+        )
+
+        versions_raw = {}
+        file_traces = {}
+        sanity_rows = []
+
+        for v in sim["versions"]:
+            uv = sim["versions_unified"][v]
+            versions_raw[int(v)] = {
+                "version": int(v),
+                "grid_spec": sim["unified_spec"],
+                "mean_fields": {k: np.asarray(uv["unified_mean"][k], dtype=float) for k in uv["unified_mean"]},
+                "mean_units": dict(uv.get("unified_mean_units", {})),
+                "sigma_fields": {k: np.asarray(uv["unified_sigma_prior_total"][k], dtype=float) for k in uv["unified_sigma_prior_total"]},
+                "sigma_units": dict(uv.get("unified_sigma_units", {})),
+                "vs30": uv.get("unified_vs30", None),
+                "lats_1d": sim["unified_axes"]["lats_1d"],
+                "lons_1d": sim["unified_axes"]["lons_1d"],
+                "stations": {"instrumented": [], "dyfi": []},
+                "counts": {"n_instrumented": 0, "n_dyfi": 0},
+                "station_parse_debug": {},
+                "rupture_loaded": False,
+                "uncertainty_xml_exists": False,
+                "stationlist_exists": False,
+            }
+            file_traces[int(v)] = {"simulation": True}
+            sanity_rows.append(
+                {
+                    "version": int(v),
+                    "n_instrumented": len(obs_by_version[int(v)]["obs_seismic"]),
+                    "n_dyfi": len(obs_by_version[int(v)]["obs_intensity_stationlist"]),
+                    "rupture_loaded": False,
+                    "uncertainty_xml_exists": False,
+                    "stationlist_exists": False,
+                    "aligned_to_unified": True,
+                    "pga_df_rows": 0,
+                    "pga_rows_after_lonlat_filter": 0,
+                    "pga_rows_after_value_filter": 0,
+                    "pgv_df_rows": 0,
+                    "sa_df_rows": 0,
+                    "mmi_df_rows": 0,
+                    "mmi_rows_after_lonlat_filter": 0,
+                    "mmi_rows_after_intensity_filter": 0,
+                    "station_parse_note": "synthetic",
+                    "mean_units_keys": sorted(list((uv.get("unified_mean_units") or {}).keys())),
+                    "sigma_units_keys": sorted(list((uv.get("unified_sigma_units") or {}).keys())),
+                }
+            )
+
+        base_folder = str(Path.cwd())
+        self.uq_state = {
+            "event_id": str(event_id),
+            "version_list": sim["versions"],
+            "requested_imts": [str(i).upper().strip() for i in imts],
+            "per_version_available_imts": {int(v): [str(i).upper().strip() for i in imts] for v in sim["versions"]},
+            "unified_spec": sim["unified_spec"],
+            "unified_axes": sim["unified_axes"],
+            "versions_raw": versions_raw,
+            "versions_unified": sim["versions_unified"],
+            "obs_by_version": obs_by_version,
+            "sanity_rows": sanity_rows,
+            "file_traces": file_traces,
+            "base_folder": base_folder,
+            "stations_folder_used": None,
+            "rupture_folder_used": None,
+            "interp_method": "synthetic",
+            "interp_kwargs": {},
+            "output_units_requested": None,
+            "simulation_mode": True,
+        }
+        self.cdi_attach_from_version = int(cdi_from_version)
+        return self.uq_state
+
+
+    def uq_run_synthetic_smoke(
+        self,
+        *,
+        version_list=None,
+        imt="MMI",
+        points=None,
+        areas=None,
+        agg="mean",
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        update_radius_km=30.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        dyfi_weight_mode="sqrt_nresp",
+        dyfi_w_max=10.0,
+    ):
+        import numpy as np
+        import pandas as pd
+
+        if not hasattr(self, "uq_state") or self.uq_state is None:
+            raise RuntimeError("Synthetic smoke requires uq_state. Call uq_sim_install_state first.")
+
+        versions = self.uq_state["version_list"] if version_list is None else [int(v) for v in list(version_list)]
+        versions = sorted([int(v) for v in versions])
+        if len(versions) < 2:
+            raise ValueError("Synthetic smoke requires at least two versions.")
+
+        imtU = str(imt).upper().strip()
+
+        if points is None and areas is None:
+            axes = self.uq_state["unified_axes"]
+            lat2d = np.asarray(axes["lat2d"], dtype=float)
+            lon2d = np.asarray(axes["lon2d"], dtype=float)
+            mid = (lat2d.shape[0] // 2, lon2d.shape[1] // 2)
+            points = [{"id": "CENTER", "lat": float(lat2d[mid]), "lon": float(lon2d[mid])}]
+
+        methods = ("ShakeMap", "bayes", "bayes_2lik", "dyfi_weighted")
+
+        def _run(dyfi_source, prior_version):
+            df = self.uq_extract_target_series(
+                version_list=versions,
+                imt=imtU,
+                points=points,
+                areas=areas,
+                agg=agg,
+                prior_version=prior_version,
+                update_radius_km=update_radius_km,
+                kernel=kernel,
+                kernel_scale_km=kernel_scale_km,
+                measurement_sigma=measurement_sigma,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                dyfi_weight_mode=dyfi_weight_mode,
+                dyfi_w_max=dyfi_w_max,
+                methods_to_compute=methods,
+                dyfi_source=dyfi_source,
+                audit=False,
+            )
+            df = df.copy()
+            df["dyfi_source"] = str(dyfi_source)
+            df["prior_version"] = "None" if prior_version is None else str(int(prior_version))
+            return df
+
+        df_station = _run("stationlist", None)
+        df_cdi = _run("cdi", None)
+        df_auto = _run("auto", None)
+
+        fixed_prior = versions[-1]
+        df_prior = _run("stationlist", fixed_prior)
+
+        df_all = pd.concat([df_station, df_cdi, df_auto, df_prior], ignore_index=True)
+
+        def _subset(df, method, dyfi_source=None, prior=None):
+            sub = df[df["method"] == method]
+            if dyfi_source is not None:
+                sub = sub[sub["dyfi_source"] == dyfi_source]
+            if prior is not None:
+                sub = sub[sub["prior_version"] == prior]
+            return sub.sort_values(["version", "target_id"]).reset_index(drop=True)
+
+        def _allclose(a, b, tol=1e-6):
+            return np.allclose(np.asarray(a, dtype=float), np.asarray(b, dtype=float), rtol=0.0, atol=tol)
+
+        diag = {"checks": {}}
+
+        bayes = _subset(df_station, "bayes", dyfi_source="stationlist", prior="None")
+        bayes2 = _subset(df_station, "bayes_2lik", dyfi_source="stationlist", prior="None")
+        if _allclose(bayes["mean_predicted"], bayes2["mean_predicted"]) and _allclose(bayes["sigma_total_predicted"], bayes2["sigma_total_predicted"]):
+            raise AssertionError("Synthetic smoke failed: bayes and bayes_2lik results are identical.")
+        diag["checks"]["bayes_vs_bayes_2lik"] = "ok"
+
+        cdi_versions = [v for v in versions if len(self.uq_state["obs_by_version"][int(v)]["obs_intensity_cdi"]) > 0]
+        if cdi_versions:
+            cdi_station = _subset(df_station, "bayes_2lik", dyfi_source="stationlist", prior="None")
+            cdi_cdi = _subset(df_cdi, "bayes_2lik", dyfi_source="cdi", prior="None")
+            mask_station = cdi_station["version"].isin(cdi_versions)
+            mask_cdi = cdi_cdi["version"].isin(cdi_versions)
+            if _allclose(cdi_station[mask_station]["mean_predicted"], cdi_cdi[mask_cdi]["mean_predicted"]) and _allclose(
+                cdi_station[mask_station]["sigma_total_predicted"], cdi_cdi[mask_cdi]["sigma_total_predicted"]
+            ):
+                raise AssertionError("Synthetic smoke failed: CDI results identical to stationlist results.")
+            diag["checks"]["cdi_vs_stationlist"] = "ok"
+        else:
+            raise AssertionError("Synthetic smoke failed: no CDI observations available for comparison.")
+
+        pub = _subset(df_station, "ShakeMap", dyfi_source="stationlist", prior="None")
+        if len(pub["mean_predicted"].unique()) <= 1:
+            raise AssertionError("Synthetic smoke failed: ShakeMap means identical across versions.")
+        diag["checks"]["version_evolution"] = "ok"
+
+        if not (pub.groupby("target_id")["sigma_total_predicted"].apply(lambda s: float(s.iloc[-1]) < float(s.iloc[0])).all()):
+            raise AssertionError("Synthetic smoke failed: sigma_total does not decrease with version.")
+        diag["checks"]["sigma_decrease"] = "ok"
+
+        bayes_prior = _subset(df_prior, "bayes", dyfi_source="stationlist", prior=str(int(fixed_prior)))
+        if _allclose(bayes["mean_predicted"], bayes_prior["mean_predicted"]) and _allclose(
+            bayes["sigma_total_predicted"], bayes_prior["sigma_total_predicted"]
+        ):
+            raise AssertionError("Synthetic smoke failed: changing prior_version has no effect.")
+        diag["checks"]["prior_version_effect"] = "ok"
+
+        original_obs = self.uq_state["obs_by_version"]
+        remove_version = versions[-1]
+        try:
+            stripped = {int(v): dict(original_obs[int(v)]) for v in original_obs}
+            stripped[int(remove_version)] = {
+                "obs_seismic": [],
+                "obs_intensity_stationlist": [],
+                "obs_intensity_cdi": [],
+                "summary": {"counts": {"obs_seismic": 0, "obs_intensity_stationlist": 0, "obs_intensity_cdi": 0}},
+            }
+            self.uq_state["obs_by_version"] = stripped
+            df_no_obs = self.uq_extract_target_series(
+                version_list=[remove_version],
+                imt=imtU,
+                points=points,
+                areas=areas,
+                agg=agg,
+                prior_version=None,
+                update_radius_km=update_radius_km,
+                kernel=kernel,
+                kernel_scale_km=kernel_scale_km,
+                measurement_sigma=measurement_sigma,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                dyfi_weight_mode=dyfi_weight_mode,
+                dyfi_w_max=dyfi_w_max,
+                methods_to_compute=methods,
+                dyfi_source="stationlist",
+                audit=False,
+            )
+        finally:
+            self.uq_state["obs_by_version"] = original_obs
+
+        base_last = df_station[(df_station["version"] == int(remove_version)) & (df_station["method"] == "bayes_2lik")]
+        stripped_last = df_no_obs[df_no_obs["method"] == "bayes_2lik"]
+        if _allclose(base_last["mean_predicted"], stripped_last["mean_predicted"]) and _allclose(
+            base_last["sigma_total_predicted"], stripped_last["sigma_total_predicted"]
+        ):
+            raise AssertionError("Synthetic smoke failed: removing observations does not change output.")
+        diag["checks"]["obs_removal_effect"] = "ok"
+
+        return df_all, diag
+
+
+    def uq_kriging_update_grid(
+        self,
+        *args,
+        **kwargs,
+    ):
+        raise NotImplementedError("Kriging update is a placeholder in this research build; kernel routing is intentionally unimplemented.")
