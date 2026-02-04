@@ -871,15 +871,6 @@ class SHAKEuq:
 
 
 
-
-
-    
-
-
-
-
-    
-    
     # ---------------------------
     # File resolution (match your conventions)
     # ---------------------------
