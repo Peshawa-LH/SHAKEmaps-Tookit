@@ -3836,22 +3836,7 @@ class SHAKEuq:
         sig = df.pivot(index="lat", columns="lon", values=sig_col).values
         return np.asarray(mu, dtype=float), np.asarray(sig, dtype=float)
     
-    
-    # ----------------------------------------------------------------------
-    # 4) Observations collection (IMT-aware, robust; logs counts by type)
-    # ----------------------------------------------------------------------
-    def _uq_infer_obs_domain(self, imt):
-        """
-        Return preferred observation domain for an IMT:
-          - "intensity" for MMI
-          - "seismic" for PGA/PGV/SA*
-        """
-        imtU = str(imt).upper()
-        if imtU == "MMI":
-            return "intensity"
-        return "seismic"
-    
-    
+
     
     
     def _uq_hierarchical_posterior_at_mask(
@@ -7572,977 +7557,6 @@ class SHAKEuq:
 
 
 
-    # ============================================================
-    #
-    # UQ PLOTTING UPGRADE PATCH (PUBLISHING-READY + CARTOPY MAPS)
-    # UPDATED PATCH 26.6
-    #
-    # 
-    #  
-    #  
-    #
-    # ============================================================
-
-
-
-    def uq_plot_targets_decay(
-        self,
-        version_list,
-        imt="MMI",
-        points=None,
-        areas=None,
-        what="sigma_total",
-        methods=("ShakeMap", "bayes", "hierarchical", "kriging", "montecarlo"),
-        agg="mean",
-        global_stat=None,
-        prior_version=None,
-        # UQ controls
-        sigma_total_from_shakemap=True,
-        sigma_aleatory=None,
-        update_radius_km=30.0,
-        kernel="gaussian",
-        kernel_scale_km=20.0,
-        measurement_sigma=0.30,
-        # NEW (v26.6 Step 4): two-likelihood controls (optional)
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        ok_range_km=60.0,
-        ok_variogram="exponential",
-        ok_nugget=1e-6,
-        ok_sill=None,
-        ok_cap_sigma_to_prior=True,
-        mc_nsim=2000,
-        mc_include_aleatory=True,
-        # unified controls
-        grid_res=None,
-        interp_method="nearest",
-        interp_kwargs=None,
-        # plotting kwargs
-        figsize=(9, 4.8),
-        dpi=300,
-        ylog=False,
-        ymin=None,
-        ymax=None,
-        xmin=None,
-        xmax=None,
-        xrotation=45,
-        show_title=True,
-        title=None,
-        show_grid=True,
-        legend=True,
-        legend_kwargs=None,
-        tight=True,
-        output_path=None,
-        save=False,
-        save_formats=("png", "pdf"),
-        show=True,
-        # label sizing
-        label_size=None,
-        tick_size=None,
-        title_size=None,
-        legend_size=None,
-        xlabel="ShakeMap version",
-        ylabel=None,
-        linewidth=1.5,
-        markerstyle="o",
-        markersize=10,
-        markevery=1,
-        # combined plot controls
-        plot_combined=True,
-        combined_figsize=(11, 6),
-        combined_legend_ncol=2,
-        # published band
-        published_band=True,
-        published_band_alpha=0.18,
-        # truth overlay (default-off)
-        plot_truth=False,
-        truth_value=None,
-        truth_key=None,
-        truth_label="Truth",
-        truth_line_kwargs=None,
-        truth_marker_kwargs=None,
-        mark_first_reach=False,
-        reach_mode="first_cross",
-        truth_tolerance=None,
-        truth_method_for_reach="ShakeMap",
-        warn_on_truth_miss=True,
-        # audit
-        audit=True,
-        audit_output_path=None,
-        audit_prefix=None,
-    ):
-        """
-        v26.6-compatible target-decay plotter.
-    
-        Key behavior:
-          - Option-B compute: passes methods_to_compute=methods into uq_extract_target_series
-          - Step 4 plumbing: accepts measurement_sigma_instr / measurement_sigma_dyfi and forwards them
-            (they only matter if uq_extract_target_series uses them; otherwise harmless)
-          - Truth overlay:
-              * preferred: truth stored in target dict (truth_<imt>, truth_value, truth)
-              * fallback: truth_value kwarg (scalar or dict keyed by target_id)
-          - Axis control: ymin/ymax/xmin/xmax supported
-        """
-        import numpy as np
-        import matplotlib.pyplot as plt
-    
-        # normalize methods (allow "published" alias)
-        methods = [("ShakeMap" if str(m).lower().strip() == "published" else m) for m in methods]
-        methods = tuple(methods)
-    
-        # -----------------------------
-        # 1) Extract series (Option B: compute only requested methods)
-        # -----------------------------
-        df = self.uq_extract_target_series(
-            version_list=version_list,
-            imt=imt,
-            points=points,
-            areas=areas,
-            agg=agg,
-            global_stat=global_stat,
-            shakemap_total_sigma_mode="raw",
-            sigma_total_from_shakemap=sigma_total_from_shakemap,
-            sigma_aleatory=sigma_aleatory,
-            prior_version=prior_version,
-            update_radius_km=update_radius_km,
-            kernel=kernel,
-            kernel_scale_km=kernel_scale_km,
-            measurement_sigma=measurement_sigma,
-            # Step 4 forwarding (safe even if unused internally)
-            measurement_sigma_instr=measurement_sigma_instr,
-            measurement_sigma_dyfi=measurement_sigma_dyfi,
-            ok_range_km=ok_range_km,
-            ok_variogram=ok_variogram,
-            ok_nugget=ok_nugget,
-            ok_sill=ok_sill,
-            ok_cap_sigma_to_prior=ok_cap_sigma_to_prior,
-            mc_nsim=mc_nsim,
-            mc_include_aleatory=mc_include_aleatory,
-            grid_res=grid_res,
-            interp_method=interp_method,
-            interp_kwargs=interp_kwargs,
-            methods_to_compute=methods,  # <<< Option B
-            audit=audit,
-            audit_output_path=audit_output_path or output_path,
-            audit_prefix=audit_prefix,
-        )
-    
-        # -----------------------------
-        # 2) "what" aliases + delta support
-        # -----------------------------
-        w = str(what).strip()
-        alias = {
-            "sigma_total": "sigma_total_predicted",
-            "sigma_total_raw": "sigma_total_published_raw",
-            "sigma_epistemic": "sigma_epistemic_predicted",
-            "sigma_aleatoric": "sigma_aleatoric_used",
-            "mean": "mean_predicted",
-        }
-        if w in alias:
-            w = alias[w]
-    
-        # delta support: delta_<col> relative to first shown version (per target/method)
-        if w.lower().startswith("delta_"):
-            base_col = w[len("delta_") :].strip()
-            if base_col not in df.columns:
-                raise ValueError(
-                    f'delta requested but base column "{base_col}" not found. '
-                    f"Choose from: {sorted(df.columns.tolist())}"
-                )
-            df2 = df.copy()
-            df2[w] = np.nan
-            for tid in df2["target_id"].unique().tolist():
-                for m in df2["method"].unique().tolist():
-                    sub0 = df2[(df2["target_id"] == tid) & (df2["method"] == m)].sort_values("version")
-                    if len(sub0) == 0:
-                        continue
-                    try:
-                        base = float(sub0[base_col].values[0])
-                    except Exception:
-                        continue
-                    idx = (df2["target_id"] == tid) & (df2["method"] == m)
-                    df2.loc[idx, w] = df2.loc[idx, base_col].astype(float) - base
-            df = df2
-    
-        if w not in df.columns:
-            raise ValueError(f'what="{what}" not available. Choose from: {sorted(df.columns.tolist())}')
-    
-        w_is_mean_like = str(w).lower().startswith("mean")
-    
-        # -----------------------------
-        # 3) Unified axes for band shading masks
-        # -----------------------------
-        versions = [int(v) for v in (version_list or [])]
-        _, lat2d, lon2d = self._uq_get_unified_for_versions(
-            versions,
-            imt=str(imt).upper(),
-            grid_res=grid_res,
-            interp_method=interp_method,
-            interp_kwargs=interp_kwargs,
-        )
-    
-        targets_meta = {}
-        if global_stat is not None:
-            gs = str(global_stat).lower().strip()
-            gid = f"GLOBAL_{gs.replace(' ', '_')}".replace("__", "_")
-            targets = [{"id": gid, "type": "global"}]
-        else:
-            targets = self._uq_parse_targets(points=points, areas=areas)
-    
-        # map id -> target dict for truth lookup
-        targets_by_id = {}
-        try:
-            if isinstance(targets, list):
-                for t in targets:
-                    if isinstance(t, dict) and t.get("id") is not None:
-                        targets_by_id[str(t["id"])] = t
-        except Exception:
-            targets_by_id = {}
-    
-        for t in targets:
-            tid = t.get("id", "GLOBAL")
-            if t.get("type") == "global":
-                mask = np.isfinite(lat2d)
-                ttype = "global"
-            else:
-                mask, _meta = self._uq_target_mask(t, lat2d, lon2d)
-                ttype = t.get("type", "target")
-            targets_meta[tid] = {"type": ttype, "mask": mask}
-    
-        targets = sorted(df["target_id"].unique().tolist())
-    
-        # -----------------------------
-        # Truth helpers
-        # -----------------------------
-        def _get_truth_for_target(_tid):
-            if not plot_truth:
-                return None
-    
-            tv = None
-            tdict = targets_by_id.get(str(_tid), None)
-    
-            # 1) look inside target dict
-            if isinstance(tdict, dict):
-                if truth_key is not None:
-                    tv = tdict.get(truth_key, None)
-                else:
-                    imtl = str(imt).lower().strip()
-                    for k in (f"truth_{imtl}", "truth_value", "truth"):
-                        if k in tdict:
-                            tv = tdict.get(k, None)
-                            break
-    
-            # 2) fallback to truth_value kwarg
-            if tv is None and truth_value is not None:
-                if isinstance(truth_value, dict):
-                    tv = truth_value.get(str(_tid), None)
-                else:
-                    tv = truth_value
-    
-            if tv is None:
-                if warn_on_truth_miss and plot_truth:
-                    # keep silent by default; user can inspect via audit logs
-                    pass
-                return None
-    
-            try:
-                return float(tv)
-            except Exception:
-                return None
-    
-        def _first_reach_marker(x, y, truth, mode="first_cross", tol=None):
-            if truth is None:
-                return None, None, None
-            x = np.asarray(x, dtype=float)
-            y = np.asarray(y, dtype=float)
-            ok = np.isfinite(x) & np.isfinite(y)
-            x, y = x[ok], y[ok]
-            if len(x) == 0:
-                return None, None, None
-    
-            mode = str(mode).lower().strip()
-    
-            if mode == "closest":
-                d = np.abs(y - truth)
-                j = int(np.argmin(d))
-                if tol is not None and float(d[j]) > float(tol):
-                    return None, None, None
-                return x[j], y[j], j
-    
-            # default: first_cross (>= truth)
-            hit = (y >= truth)
-            if not np.any(hit):
-                if tol is not None:
-                    near = (np.abs(y - truth) <= float(tol))
-                    if np.any(near):
-                        j = int(np.argmax(near))
-                        return x[j], y[j], j
-                return None, None, None
-    
-            j = int(np.argmax(hit))
-            return x[j], y[j], j
-    
-        _truth_line_defaults = dict(
-            color="red",
-            linestyle="--",
-            linewidth=max(1.0, float(linewidth) * 0.9),
-            alpha=0.95,
-        )
-        _truth_marker_defaults = dict(
-            color="red",
-            marker="*",
-            markersize=max(10, int(markersize * 1.2)),
-            linewidth=0,
-        )
-    
-        # -----------------------------
-        # 4) Per-target plots
-        # -----------------------------
-        for tid in targets:
-            sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
-            sub = sub.sort_values(["version", "method"])
-    
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    
-            # published band for area/global
-            tinfo = targets_meta.get(tid, {})
-            is_area_like = (tinfo.get("type") in ("area", "global")) and (tinfo.get("mask") is not None)
-    
-            if published_band and is_area_like and ("ShakeMap" in methods):
-                mask = tinfo["mask"]
-                xs, lo, hi = [], [], []
-                for v in sorted(sub["version"].unique().tolist()):
-                    band = self._uq_band_minmax_unified(
-                        version=int(v),
-                        imt=str(imt).upper(),
-                        lat2d=lat2d,
-                        lon2d=lon2d,
-                        mask=mask,
-                        grid_res=grid_res,
-                        interp_method=interp_method,
-                        interp_kwargs=interp_kwargs,
-                    )
-                    xs.append(int(v))
-                    if w_is_mean_like:
-                        lo.append(band["mu_min"])
-                        hi.append(band["mu_max"])
-                    else:
-                        lo.append(band["sig_min"])
-                        hi.append(band["sig_max"])
-    
-                if len(xs) > 0:
-                    ax.fill_between(
-                        xs,
-                        lo,
-                        hi,
-                        alpha=float(published_band_alpha),
-                        label="ShakeMap min/max (area/global)",
-                    )
-    
-            # plot series
-            for m in methods:
-                s = sub[sub["method"] == m].sort_values("version")
-                ax.plot(
-                    s["version"].values,
-                    s[w].values,
-                    marker=markerstyle,
-                    markersize=markersize,
-                    markevery=markevery,
-                    linewidth=linewidth,
-                    label=m,
-                )
-    
-            if ylog:
-                ax.set_yscale("log")
-            if ymin is not None or ymax is not None:
-                ax.set_ylim(ymin, ymax)
-            if xmin is not None or xmax is not None:
-                ax.set_xlim(xmin, xmax)
-    
-            # truth overlay (mean-like only)
-            tv = _get_truth_for_target(tid)
-            if w_is_mean_like and (tv is not None):
-                lk = dict(_truth_line_defaults)
-                lk.update(truth_line_kwargs or {})
-                ax.axhline(float(tv), **lk, label=str(truth_label))
-    
-                if mark_first_reach and (truth_method_for_reach in methods):
-                    s0 = sub[sub["method"] == truth_method_for_reach].sort_values("version")
-                    xm, ym, _ = _first_reach_marker(
-                        s0["version"].values,
-                        s0[w].values,
-                        float(tv),
-                        mode=reach_mode,
-                        tol=truth_tolerance,
-                    )
-                    if xm is not None:
-                        mk = dict(_truth_marker_defaults)
-                        mk.update(truth_marker_kwargs or {})
-                        ax.plot([xm], [ym], label=f"first reach ({truth_method_for_reach})", **mk)
-    
-            ax.set_xlabel(str(xlabel))
-            if ylabel is None:
-                ax.set_ylabel(f"{str(imt).upper()} mean" if w_is_mean_like else f"{w}")
-            else:
-                ax.set_ylabel(str(ylabel))
-    
-            if show_grid:
-                ax.grid(True, which="both", alpha=0.3)
-    
-            if show_title:
-                if title is not None:
-                    ax.set_title(
-                        str(title).replace("{target}", str(tid)).replace("{imt}", str(imt).upper()),
-                        fontsize=title_size,
-                    )
-                else:
-                    ax.set_title(f"{str(imt).upper()} target decay @ {tid} ({w})", fontsize=title_size)
-    
-            ax.tick_params(axis="x", rotation=float(xrotation))
-            if tick_size is not None:
-                ax.tick_params(axis="both", labelsize=float(tick_size))
-            if label_size is not None:
-                ax.xaxis.label.set_size(float(label_size))
-                ax.yaxis.label.set_size(float(label_size))
-    
-            if legend:
-                lk = dict(legend_kwargs or {})
-                if legend_size is not None:
-                    lk.setdefault("fontsize", float(legend_size))
-                ax.legend(**lk)
-    
-            if tight:
-                fig.tight_layout()
-    
-            if save and output_path is not None:
-                self._uq_save_figure_safe(
-                    fig,
-                    fname_stem=f"UQ-TargetDecay-{str(imt).upper()}-{tid}-{w}",
-                    subdir="uq_plots/targets_decay",
-                    output_path=output_path,
-                    save_formats=save_formats,
-                    dpi=dpi,
-                )
-    
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
-    
-        # -----------------------------
-        # 5) Combined plot
-        # -----------------------------
-        if plot_combined:
-            fig, ax = plt.subplots(figsize=combined_figsize, dpi=dpi)
-    
-            # only support a single global truth line in combined plot when truth_value is scalar
-            tv_combined = None
-            if plot_truth and (truth_value is not None) and (not isinstance(truth_value, dict)):
-                try:
-                    tv_combined = float(truth_value)
-                except Exception:
-                    tv_combined = None
-    
-            for tid in targets:
-                sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
-                sub = sub.sort_values(["version", "method"])
-                for m in methods:
-                    s = sub[sub["method"] == m].sort_values("version")
-                    if len(s) == 0:
-                        continue
-                    ax.plot(
-                        s["version"].values,
-                        s[w].values,
-                        marker=markerstyle,
-                        markersize=markersize,
-                        markevery=markevery,
-                        linewidth=linewidth,
-                        label=f"{tid} — {m}",
-                    )
-    
-            if w_is_mean_like and (tv_combined is not None):
-                lk = dict(_truth_line_defaults)
-                lk.update(truth_line_kwargs or {})
-                ax.axhline(float(tv_combined), **lk, label=str(truth_label))
-    
-            if ylog:
-                ax.set_yscale("log")
-            if ymin is not None or ymax is not None:
-                ax.set_ylim(ymin, ymax)
-            if xmin is not None or xmax is not None:
-                ax.set_xlim(xmin, xmax)
-    
-            ax.set_xlabel(str(xlabel))
-            ax.set_ylabel(str(ylabel) if ylabel is not None else f"{w}")
-    
-            if show_grid:
-                ax.grid(True, which="both", alpha=0.3)
-    
-            if show_title:
-                ax.set_title(f"{str(imt).upper()} combined targets decay ({w})", fontsize=title_size)
-    
-            ax.tick_params(axis="x", rotation=float(xrotation))
-            if tick_size is not None:
-                ax.tick_params(axis="both", labelsize=float(tick_size))
-            if label_size is not None:
-                ax.xaxis.label.set_size(float(label_size))
-                ax.yaxis.label.set_size(float(label_size))
-    
-            if legend:
-                lk = dict(legend_kwargs or {})
-                if legend_size is not None:
-                    lk.setdefault("fontsize", float(legend_size))
-                ax.legend(ncol=int(combined_legend_ncol), **lk)
-    
-            fig.tight_layout()
-    
-            if save and output_path is not None:
-                self._uq_save_figure_safe(
-                    fig,
-                    fname_stem=f"UQ-TargetDecay-COMBINED-{str(imt).upper()}-{w}",
-                    subdir="uq_plots/targets_decay",
-                    output_path=output_path,
-                    save_formats=save_formats,
-                    dpi=dpi,
-                )
-    
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
-    
-        return df
-    
-    
-
-
-    def _uq_collect_obs_for_version(
-        self,
-        version,
-        imt,
-        measurement_sigma=0.30,
-        include_weights=True,
-        prefer_domain=True,
-        allow_fallback=True,
-        # NEW (v26.6 Step 4): two-likelihood controls
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        attach_per_obs_sigma=True,
-    ):
-        """
-        Collect observations available for a given version/imt.
-
-        v26.6 Step 4:
-          - Optionally attaches per-observation measurement variance:
-              * instrumented/seismic -> measurement_sigma_instr
-              * DYFI/intensity      -> measurement_sigma_dyfi
-            (fallback to measurement_sigma if the specific one is None)
-          - When prefer_domain=True, retains legacy domain filtering behavior.
-          - When prefer_domain=False, returns ALL obs (mixed streams).
-
-        Returns:
-          obs_list: list of dicts with fields:
-            lat, lon, y_ws, w, type, domain,
-            (optional) meas_var, sigma_obs
-          obs_counts: dict with counts by inferred type
-        """
-        imtU = str(imt).upper().strip()
-        domain_pref = self._uq_infer_obs_domain(imtU)
-
-        obs = []
-        counts = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
-
-        raw = None
-        if hasattr(self, "_uq_collect_observations"):
-            try:
-                raw = self._uq_collect_observations(int(version), imtU)
-            except Exception:
-                raw = None
-
-        if not raw:
-            return [], counts
-
-        # set per-stream measurement sigmas (working-space assumed consistent with your existing knobs)
-        sig_instr = measurement_sigma if (measurement_sigma_instr is None) else float(measurement_sigma_instr)
-        sig_dyfi  = measurement_sigma if (measurement_sigma_dyfi  is None) else float(measurement_sigma_dyfi)
-
-        # normalize and infer domains
-        tmp = []
-        for r in raw:
-            if r is None or (not isinstance(r, dict)):
-                continue
-            if ("lat" not in r) or ("lon" not in r) or ("value" not in r):
-                continue
-            try:
-                _ = float(r.get("value"))
-            except Exception:
-                continue
-
-            typ = str(r.get("type", r.get("domain", r.get("source", "unknown")))).lower()
-            if ("dyfi" in typ) or ("mmi" in typ) or ("intensity" in typ) or ("cdi" in typ):
-                dom = "intensity"
-            elif ("station" in typ) or ("seismic" in typ) or ("pga" in typ) or ("pgv" in typ) or ("instrument" in typ):
-                dom = "seismic"
-            else:
-                dom = "unknown"
-
-            tmp.append((r, dom))
-
-        # legacy domain preference (keeps your old behavior)
-        if prefer_domain:
-            preferred = [r for (r, dom) in tmp if dom == domain_pref]
-            if preferred:
-                use = preferred
-            else:
-                use = [r for (r, dom) in tmp] if allow_fallback else []
-        else:
-            use = [r for (r, dom) in tmp]
-
-        # build obs list
-        for (r, dom) in tmp:
-            if r not in use:
-                continue
-
-            try:
-                y = float(r.get("value"))
-            except Exception:
-                continue
-
-            y_ws = self._uq_obs_to_ws(imtU, y)
-            w = float(r.get("w", 1.0)) if include_weights else 1.0
-
-            typ = str(r.get("type", r.get("domain", r.get("source", "obs"))))
-            typL = typ.lower()
-
-            if dom == "intensity":
-                counts["intensity"] += 1
-                sig_obs = sig_dyfi
-            elif dom == "seismic":
-                counts["seismic"] += 1
-                sig_obs = sig_instr
-            else:
-                counts["unknown"] += 1
-                sig_obs = float(measurement_sigma)
-
-            ob = {
-                "lat": float(r["lat"]),
-                "lon": float(r["lon"]),
-                "y_ws": float(y_ws),
-                "w": float(w),
-                "type": typ,
-                "domain": dom,
-            }
-
-            if attach_per_obs_sigma:
-                ob["sigma_obs"] = float(sig_obs)
-                ob["meas_var"] = float(sig_obs) ** 2
-
-            obs.append(ob)
-
-        counts["total"] = len(obs)
-        return obs, counts
-
-
-
-
-    def uq_extract_target_series(
-        self,
-        version_list,
-        imt="MMI",
-        points=None,
-        areas=None,
-        agg="mean",
-        global_stat=None,
-        shakemap_total_sigma_mode="raw",
-        sigma_total_from_shakemap=True,
-        sigma_aleatory=None,
-        prior_version=None,
-        update_radius_km=30.0,
-        kernel="gaussian",
-        kernel_scale_km=20.0,
-        measurement_sigma=0.30,
-        # NEW (v26.6 Step 4)
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        # kriging (kept for signature compatibility)
-        ok_range_km=60.0,
-        ok_variogram="exponential",
-        ok_nugget=1e-6,
-        ok_sill=None,
-        ok_cap_sigma_to_prior=True,
-        # montecarlo
-        mc_nsim=2000,
-        mc_include_aleatory=True,
-        # unified grid controls
-        grid_res=None,
-        interp_method="nearest",
-        interp_kwargs=None,
-        # Option B safety
-        methods_to_compute=None,
-        # audit
-        audit=True,
-        audit_output_path=None,
-        audit_prefix=None,
-    ):
-        """
-        v26.6 FIXED:
-          - bayes_2lik preserves per-observation meas_var / sigma_obs
-          - NO reconstruction of obs dictionaries
-          - bayes remains legacy, bayes_2lik truly two-likelihood
-        """
-        import numpy as np
-        import pandas as pd
-    
-        # ------------------------------------------------------------
-        # Method handling
-        # ------------------------------------------------------------
-        def _norm_method(m):
-            s = str(m).strip()
-            return ("ShakeMap" if s.lower() == "published" else s)
-    
-        legacy = ("bayes", "bayes_2lik", "assimilation_chain", "hierarchical", "kriging", "montecarlo")
-        if methods_to_compute is None:
-            compute = set(["ShakeMap"] + list(legacy))
-        else:
-            compute = set([_norm_method(m) for m in methods_to_compute])
-            compute.add("ShakeMap")
-    
-        need_bayes_ref = ("montecarlo" in compute)
-    
-        imtU = str(imt).upper().strip()
-        versions = sorted([int(v) for v in version_list])
-    
-        # ------------------------------------------------------------
-        # Targets
-        # ------------------------------------------------------------
-        if global_stat is not None:
-            gs = str(global_stat).lower().strip()
-            targets = [{"id": f"GLOBAL_{gs}", "type": "global"}]
-        else:
-            targets = self._uq_parse_targets(points=points, areas=areas)
-    
-        # ------------------------------------------------------------
-        # Unified grid
-        # ------------------------------------------------------------
-        _, lat2d, lon2d = self._uq_get_unified_for_versions(
-            versions,
-            imt=imtU,
-            grid_res=grid_res,
-            interp_method=interp_method,
-            interp_kwargs=interp_kwargs,
-        )
-    
-        v0 = int(prior_version) if prior_version is not None else int(versions[0])
-    
-        mu0_lin, sig0_raw = self._uq_get_mu_sigma_unified(
-            v0, imtU, lat2d, lon2d,
-            grid_res=grid_res,
-            interp_method=interp_method,
-            interp_kwargs=interp_kwargs,
-        )
-        mu0_ws = self._uq_mu_to_ws(imtU, mu0_lin)
-    
-        _, s_a0, s_ep0 = self._uq_decompose_sigma_safe(
-            imtU,
-            sig0_raw,
-            sigma_aleatory=sigma_aleatory,
-            sigma_total_from_shakemap=sigma_total_from_shakemap,
-        )
-    
-        rows = []
-        audit_rows = []
-        agg_effective = str(agg).lower().strip()
-    
-        # ============================================================
-        # TARGET LOOP
-        # ============================================================
-        for t in targets:
-    
-            if t.get("type") == "global":
-                mask = np.isfinite(lat2d)
-                meta = {"kind": "global"}
-                ttype = "global"
-            else:
-                mask, meta = self._uq_target_mask(t, lat2d, lon2d)
-                ttype = t.get("type", "target")
-    
-            if mask is None or not np.any(mask):
-                continue
-    
-            n_cells = int(mask.sum())
-    
-            mu0_lin_t = self._uq_agg(mu0_lin[mask], agg=agg_effective)
-            sig0_raw_t = self._uq_agg(sig0_raw[mask], agg=agg_effective)
-            s_a0_t = self._uq_agg(s_a0[mask], agg=agg_effective)
-            s_ep0_t = self._uq_agg(s_ep0[mask], agg=agg_effective)
-    
-            if "assimilation_chain" in compute:
-                mu_chain_ws = mu0_ws.copy()
-                s_ep_chain = s_ep0.copy()
-    
-            # ========================================================
-            # VERSION LOOP
-            # ========================================================
-            for v in versions:
-    
-                mu_v_lin, sig_v_raw = self._uq_get_mu_sigma_unified(
-                    int(v), imtU, lat2d, lon2d,
-                    grid_res=grid_res,
-                    interp_method=interp_method,
-                    interp_kwargs=interp_kwargs,
-                )
-    
-                mean_pub = self._uq_agg(mu_v_lin[mask], agg=agg_effective)
-                sig_pub = self._uq_agg(sig_v_raw[mask], agg=agg_effective)
-    
-                rows.append({
-                    "target_id": t.get("id", "GLOBAL"),
-                    "target_type": ttype,
-                    "version": int(v),
-                    "imt": imtU,
-                    "method": "ShakeMap",
-                    "mean_predicted": float(mean_pub),
-                    "sigma_total_predicted": float(sig_pub),
-                    "sigma_epistemic_predicted": np.nan,
-                    "sigma_aleatoric_used": np.nan,
-                    "n_obs_total": 0,
-                    "n_obs_seismic": 0,
-                    "n_obs_intensity": 0,
-                    "n_obs_unknown": 0,
-                    "n_cells": n_cells,
-                })
-    
-                # -----------------------------
-                # Collect observations
-                # -----------------------------
-                obs1, counts1 = self._uq_collect_obs_for_version(
-                    int(v), imtU,
-                    measurement_sigma=measurement_sigma,
-                    include_weights=True,
-                    prefer_domain=True,
-                    allow_fallback=True,
-                    attach_per_obs_sigma=False,
-                )
-    
-                obs2, counts2 = self._uq_collect_obs_for_version(
-                    int(v), imtU,
-                    measurement_sigma=measurement_sigma,
-                    include_weights=True,
-                    prefer_domain=False,
-                    allow_fallback=True,
-                    measurement_sigma_instr=measurement_sigma_instr,
-                    measurement_sigma_dyfi=measurement_sigma_dyfi,
-                    attach_per_obs_sigma=True,
-                )
-    
-                # 🚨 CRITICAL FIX:
-                # NEVER rebuild obs dictionaries — preserve meas_var
-                obs2_use = [o.copy() for o in obs2]
-                obs1_use = [o.copy() for o in obs1]
-    
-                # -----------------------------
-                # bayes (legacy)
-                # -----------------------------
-                if "bayes" in compute:
-                    if counts1.get("total", 0) == 0:
-                        mean_b, sig_b, s_ep_b = mu0_lin_t, sig0_raw_t, s_ep0_t
-                    else:
-                        mu_b_ws, s_ep_b = self._uq_bayes_local_posterior_at_mask(
-                            mu0_ws, s_ep0, s_a0,
-                            lat2d, lon2d, mask, obs1_use,
-                            update_radius_km=update_radius_km,
-                            kernel=kernel,
-                            kernel_scale_km=kernel_scale_km,
-                            measurement_sigma=measurement_sigma,
-                        )
-                        mu_b_lin = self._uq_mu_from_ws(imtU, mu_b_ws)
-                        mean_b = self._uq_agg(mu_b_lin[mask], agg=agg_effective)
-                        s_ep_b = self._uq_agg(s_ep_b[mask], agg=agg_effective)
-                        sig_b = np.sqrt(s_a0_t**2 + s_ep_b**2)
-    
-                    rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "target_type": ttype,
-                        "version": int(v),
-                        "imt": imtU,
-                        "method": "bayes",
-                        "mean_predicted": float(mean_b),
-                        "sigma_total_predicted": float(sig_b),
-                        "sigma_epistemic_predicted": float(s_ep_b),
-                        "sigma_aleatoric_used": float(s_a0_t),
-                        "n_obs_total": int(counts1.get("total", 0)),
-                        "n_obs_seismic": int(counts1.get("seismic", 0)),
-                        "n_obs_intensity": int(counts1.get("intensity", 0)),
-                        "n_obs_unknown": int(counts1.get("unknown", 0)),
-                        "n_cells": n_cells,
-                    })
-    
-                # -----------------------------
-                # bayes_2lik (FIXED)
-                # -----------------------------
-                if "bayes_2lik" in compute:
-                    if counts2.get("total", 0) == 0:
-                        mean2, sig2, s_ep2 = mu0_lin_t, sig0_raw_t, s_ep0_t
-                    else:
-                        mu2_ws, s_ep2 = self._uq_bayes_local_posterior_at_mask(
-                            mu0_ws, s_ep0, s_a0,
-                            lat2d, lon2d, mask, obs2_use,
-                            update_radius_km=update_radius_km,
-                            kernel=kernel,
-                            kernel_scale_km=kernel_scale_km,
-                            measurement_sigma=measurement_sigma,
-                        )
-                        mu2_lin = self._uq_mu_from_ws(imtU, mu2_ws)
-                        mean2 = self._uq_agg(mu2_lin[mask], agg=agg_effective)
-                        s_ep2 = self._uq_agg(s_ep2[mask], agg=agg_effective)
-                        sig2 = np.sqrt(s_a0_t**2 + s_ep2**2)
-    
-                    rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "target_type": ttype,
-                        "version": int(v),
-                        "imt": imtU,
-                        "method": "bayes_2lik",
-                        "mean_predicted": float(mean2),
-                        "sigma_total_predicted": float(sig2),
-                        "sigma_epistemic_predicted": float(s_ep2),
-                        "sigma_aleatoric_used": float(s_a0_t),
-                        "n_obs_total": int(counts2.get("total", 0)),
-                        "n_obs_seismic": int(counts2.get("seismic", 0)),
-                        "n_obs_intensity": int(counts2.get("intensity", 0)),
-                        "n_obs_unknown": int(counts2.get("unknown", 0)),
-                        "n_cells": n_cells,
-                    })
-    
-                if audit:
-                    audit_rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "version": int(v),
-                        "imt": imtU,
-                        "obs_legacy": int(counts1.get("total", 0)),
-                        "obs_2lik": int(counts2.get("total", 0)),
-                        "obs_2lik_seismic": int(counts2.get("seismic", 0)),
-                        "obs_2lik_intensity": int(counts2.get("intensity", 0)),
-                    })
-    
-        df = pd.DataFrame(rows)
-    
-        if audit and hasattr(self, "_uq_write_audit"):
-            try:
-                self._uq_write_audit(
-                    df=df,
-                    audit_rows=audit_rows,
-                    output_path=audit_output_path,
-                    prefix=audit_prefix,
-                )
-            except Exception:
-                pass
-    
-        return df
-
-
-
-
     # ======================================================================
     # PATCH 26.6 (Step 5): Cross-IMT pseudo-observations (weak, GMICE default)
     #   - Adds optional pseudo-observations by converting IMT across MMI<->PGA
@@ -8775,122 +7789,7 @@ class SHAKEuq:
     # PATCH v26.6 — True Two-Likelihood Bayesian Update
     # Overrides local Bayes fusion to consume per-observation sigma
     # ======================================================================
-    #keep
-    def _uq_bayes_local_posterior_at_mask(
-        self,
-        mu0_ws,
-        sigma_ep0,
-        sigma_a,
-        lat2d,
-        lon2d,
-        target_mask,
-        obs_list,
-        update_radius_km=30.0,
-        kernel="gaussian",
-        kernel_scale_km=20.0,
-        measurement_sigma=0.30,
-    ):
-        """
-        Local conjugate Gaussian update in working space.
-    
-        v26.6:
-          - Uses per-observation likelihood variance if provided:
-              * meas_var (preferred, variance)
-              * sigma_obs (std → squared)
-          - Falls back to scalar measurement_sigma otherwise
-          - Enables true two-likelihood Bayes (bayes_2lik ≠ bayes)
-    
-        All updates are performed in the SAME space as mu0_ws:
-          - MMI → linear
-          - PGA / PGV / PSA → ln-space (already ensured upstream)
-        """
-    
-        import numpy as np
-    
-        # Initialize posterior with prior
-        mu_post = np.array(mu0_ws, copy=True)
-        sigma_ep_post = np.array(sigma_ep0, copy=True)
-    
-        # Precompute defaults
-        default_meas_var = measurement_sigma ** 2
-    
-        # Debug bookkeeping (lightweight, printed once)
-        used_meas_vars = []
-    
-        # Early exit
-        if not obs_list or not np.any(target_mask):
-            return mu_post, sigma_ep_post
-    
-        # Loop over observations
-        for ob in obs_list:
-    
-            # ------------------------------------------------------------------
-            # Extract observation properties
-            # ------------------------------------------------------------------
-            try:
-                lat_o = ob["lat"]
-                lon_o = ob["lon"]
-                y_obs = ob["value"]
-            except KeyError:
-                continue  # skip malformed obs
-    
-            # Per-observation measurement variance
-            if "meas_var" in ob and np.isfinite(ob["meas_var"]):
-                meas_var = float(ob["meas_var"])
-            elif "sigma_obs" in ob and np.isfinite(ob["sigma_obs"]):
-                meas_var = float(ob["sigma_obs"]) ** 2
-            else:
-                meas_var = default_meas_var
-    
-            used_meas_vars.append(meas_var)
-    
-            # ------------------------------------------------------------------
-            # Distance mask
-            # ------------------------------------------------------------------
-            d_km = self._haversine_km(lat2d, lon2d, lat_o, lon_o)
-            local_mask = (d_km <= update_radius_km) & target_mask
-            if not np.any(local_mask):
-                continue
-    
-            # ------------------------------------------------------------------
-            # Spatial kernel
-            # ------------------------------------------------------------------
-            if kernel == "gaussian":
-                w_space = np.exp(-(d_km[local_mask] ** 2) / (2.0 * kernel_scale_km ** 2))
-            else:
-                w_space = np.ones(np.count_nonzero(local_mask))
-    
-            # ------------------------------------------------------------------
-            # Conjugate Gaussian update (precision form)
-            # ------------------------------------------------------------------
-            # Likelihood variance = epistemic + aleatory + measurement
-            like_var = sigma_ep_post[local_mask] ** 2 + sigma_a ** 2 + meas_var
-    
-            prec_prior = 1.0 / np.maximum(sigma_ep_post[local_mask] ** 2, 1e-12)
-            prec_like = w_space / np.maximum(like_var, 1e-12)
-            prec_post = prec_prior + prec_like
-    
-            mu_post[local_mask] = (
-                mu_post[local_mask] * prec_prior + y_obs * prec_like
-            ) / prec_post
-    
-            sigma_ep_post[local_mask] = np.sqrt(1.0 / prec_post)
-    
-        # ----------------------------------------------------------------------
-        # Minimal debug print (only once per call)
-        # ----------------------------------------------------------------------
-        if hasattr(self, "debug_uq") and self.debug_uq:
-            if used_meas_vars:
-                u = np.unique(np.round(used_meas_vars, 6))
-                print(
-                    f"[UQ v26.6] bayes update used meas_var "
-                    f"(unique={u.size}): min={np.min(u):.4f}, max={np.max(u):.4f}"
-                )
-            else:
-                print("[UQ v26.6] bayes update: no valid observation variances detected")
-    
-        return mu_post, sigma_ep_post
-    
+
   
 
     # ======================================================================
@@ -8912,162 +7811,6 @@ class SHAKEuq:
         return "intensity" if imtU == "MMI" else "seismic"
     
     
-    def _uq_collect_obs_for_version(
-        self,
-        version,
-        imt,
-        measurement_sigma=0.30,
-        include_weights=True,
-        prefer_domain=True,
-        allow_fallback=True,
-        # two-likelihood controls
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        attach_per_obs_sigma=True,
-    ):
-        """
-        Robust obs collector.
-    
-        Expected upstream: self._uq_collect_observations(version, imt) -> list[dict]
-          Each dict should contain at least: lat, lon, value
-          Optional: type/domain/source/station_type/network/nresp/intensity_stddev/...
-        """
-    
-        imtU = str(imt).upper().strip()
-        dom_pref = self._uq_infer_obs_domain(imtU)
-    
-        counts = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
-        raw = None
-        if hasattr(self, "_uq_collect_observations"):
-            try:
-                raw = self._uq_collect_observations(int(version), imtU)
-            except Exception:
-                raw = None
-    
-        if not raw:
-            return [], counts
-    
-        def _infer_dom(r):
-            # try several fields
-            s = str(
-                r.get("domain",
-                      r.get("type",
-                            r.get("station_type",
-                                  r.get("network",
-                                        r.get("source", "unknown")))))
-            ).lower()
-    
-            if ("dyfi" in s) or ("macroseismic" in s) or ("intensity" in s) or ("mmi" in s):
-                return "intensity"
-            if ("seismic" in s) or ("instrument" in s) or ("station" in s) or ("pga" in s) or ("pgv" in s) or ("sa(" in s):
-                return "seismic"
-            return "unknown"
-    
-        # normalize + (optional) domain filtering
-        tmp = []
-        for r in raw:
-            if not isinstance(r, dict):
-                continue
-            if ("lat" not in r) or ("lon" not in r) or ("value" not in r):
-                continue
-            try:
-                lat = float(r["lat"]); lon = float(r["lon"]); val = float(r["value"])
-            except Exception:
-                continue
-            dom = _infer_dom(r)
-            tmp.append((r, dom))
-    
-        if prefer_domain:
-            preferred = [r for (r, dom) in tmp if dom == dom_pref]
-            if preferred:
-                use = [(r, dom_pref) for r in preferred]
-            else:
-                use = tmp if allow_fallback else []
-        else:
-            use = tmp
-    
-        obs = []
-        for r, dom in use:
-            try:
-                lat = float(r["lat"]); lon = float(r["lon"]); val = float(r["value"])
-            except Exception:
-                continue
-    
-            # working-space observation
-            y_ws = self._uq_obs_to_ws(imtU, val)
-    
-            # base weight
-            w = 1.0
-            if include_weights:
-                try:
-                    w = float(r.get("w", 1.0))
-                except Exception:
-                    w = 1.0
-    
-            # per-observation measurement sigma:
-            #  - first priority: intensity_stddev (DYFI stationlist) if present
-            #  - else: explicit sigma_obs if upstream provides
-            #  - else: 2-likelihood assignment based on inferred domain
-            #  - else: fallback to measurement_sigma
-            sigma_obs = None
-    
-            if "intensity_stddev" in r:
-                try:
-                    so = float(r.get("intensity_stddev"))
-                    if so == so and so > 0:
-                        sigma_obs = so
-                except Exception:
-                    pass
-    
-            if sigma_obs is None and "sigma_obs" in r:
-                try:
-                    so = float(r.get("sigma_obs"))
-                    if so == so and so > 0:
-                        sigma_obs = so
-                except Exception:
-                    pass
-    
-            if sigma_obs is None:
-                if dom == "seismic":
-                    so = measurement_sigma_instr if measurement_sigma_instr is not None else measurement_sigma
-                elif dom == "intensity":
-                    so = measurement_sigma_dyfi if measurement_sigma_dyfi is not None else measurement_sigma
-                else:
-                    so = measurement_sigma
-                sigma_obs = float(so)
-    
-            ob = {
-                "lat": lat,
-                "lon": lon,
-                "value": val,
-                "y_ws": float(y_ws),
-                "w": float(w),
-                "domain": dom,
-            }
-    
-            if attach_per_obs_sigma:
-                ob["sigma_obs"] = float(sigma_obs)
-                ob["meas_var"] = float(sigma_obs) ** 2  # <-- THIS is what Bayes consumes
-    
-            # keep helpful DYFI fields if they exist
-            if "nresp" in r:
-                try:
-                    ob["nresp"] = float(r.get("nresp"))
-                except Exception:
-                    pass
-    
-            obs.append(ob)
-    
-        # counts
-        for ob in obs:
-            counts["total"] += 1
-            d = ob.get("domain", "unknown")
-            if d in counts:
-                counts[d] += 1
-            else:
-                counts["unknown"] += 1
-    
-        return obs, counts
     
     
     def _uq_bayes_local_posterior_at_mask(
@@ -9247,448 +7990,6 @@ class SHAKEuq:
         return out
     
     
-    def uq_extract_target_series(
-        self,
-        version_list,
-        imt="MMI",
-        points=None,
-        areas=None,
-        agg="mean",
-        global_stat=None,
-        sigma_total_from_shakemap=True,
-        sigma_aleatory=None,
-        prior_version=None,
-        update_radius_km=30.0,
-        kernel="gaussian",
-        kernel_scale_km=20.0,
-        measurement_sigma=0.30,
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        # dyfi weighting method
-        dyfi_weight_mode="sqrt_nresp",
-        dyfi_w_max=10.0,
-        # unified grid controls
-        grid_res=None,
-        interp_method="nearest",
-        interp_kwargs=None,
-        # Option B safety
-        methods_to_compute=None,
-        # audit
-        audit=True,
-        audit_output_path=None,
-        audit_prefix=None,
-    ):
-        """
-        Target series extraction:
-          - ShakeMap (published): mean & sigma_total from file-derived unified grid
-          - bayes: v0 prior + domain-preferred obs (prefer_domain=True)
-          - bayes_2lik: v0 prior + mixed obs with per-observation meas_var (prefer_domain=False)
-          - dyfi_weighted: same as bayes_2lik but DYFI weights applied (nresp-based)
-        """
-        import numpy as np
-        import pandas as pd
-    
-        def _norm_method(m):
-            s = str(m).strip()
-            return "ShakeMap" if s.lower() == "published" else s
-    
-        if methods_to_compute is None:
-            compute = {"ShakeMap", "bayes", "bayes_2lik", "dyfi_weighted"}
-        else:
-            compute = {_norm_method(m) for m in methods_to_compute}
-            compute.add("ShakeMap")
-    
-        imtU = str(imt).upper().strip()
-        versions = sorted([int(v) for v in version_list])
-    
-        # targets
-        if global_stat is not None:
-            gs = str(global_stat).lower().strip()
-            gid = f"GLOBAL_{gs.replace(' ', '_')}".replace("__", "_")
-            targets = [{"id": gid, "type": "global"}]
-        else:
-            targets = self._uq_parse_targets(points=points, areas=areas)
-    
-        # unified grid
-        _, lat2d, lon2d = self._uq_get_unified_for_versions(
-            versions, imt=imtU,
-            grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
-        )
-    
-        v0 = int(prior_version) if prior_version is not None else int(versions[0])
-    
-        # prior fields (from v0)
-        mu0_lin, sig0_raw = self._uq_get_mu_sigma_unified(
-            v0, imtU, lat2d, lon2d,
-            grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
-        )
-        mu0_ws = self._uq_mu_to_ws(imtU, mu0_lin)
-    
-        _sig_tot0, s_a0, s_ep0 = self._uq_decompose_sigma_safe(
-            imtU,
-            sig0_raw,
-            sigma_aleatory=sigma_aleatory,
-            sigma_total_from_shakemap=sigma_total_from_shakemap,
-        )
-    
-        rows = []
-        agg_effective = str(agg).lower().strip()
-    
-        for t in targets:
-            if t.get("type") == "global":
-                mask = np.isfinite(lat2d) & np.isfinite(lon2d)
-                ttype = "global"
-            else:
-                mask, _meta = self._uq_target_mask(t, lat2d, lon2d)
-                ttype = t.get("type", "target")
-    
-            if mask is None or not np.any(mask):
-                continue
-    
-            n_cells = int(mask.sum())
-    
-            # v0 scalars
-            mu0_lin_t = self._uq_agg(mu0_lin[mask], agg=agg_effective)
-            sig0_raw_t = self._uq_agg(sig0_raw[mask], agg=agg_effective)
-            s_a0_t = self._uq_agg(s_a0[mask], agg=agg_effective)
-            s_ep0_t = self._uq_agg(s_ep0[mask], agg=agg_effective)
-    
-            for v in versions:
-                mu_v_lin, sig_v_raw = self._uq_get_mu_sigma_unified(
-                    int(v), imtU, lat2d, lon2d,
-                    grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
-                )
-                mean_pub = self._uq_agg(mu_v_lin[mask], agg=agg_effective)
-                sig_pub = self._uq_agg(sig_v_raw[mask], agg=agg_effective)
-    
-                # 1) published
-                rows.append({
-                    "target_id": t.get("id", "GLOBAL"),
-                    "target_type": ttype,
-                    "version": int(v),
-                    "imt": imtU,
-                    "method": "ShakeMap",
-                    "mean_predicted": float(mean_pub),
-                    "sigma_total_predicted": float(sig_pub),
-                    "sigma_epistemic_predicted": np.nan,
-                    "sigma_aleatoric_used": np.nan,
-                    "n_obs_total": 0,
-                    "n_obs_seismic": 0,
-                    "n_obs_intensity": 0,
-                    "n_obs_unknown": 0,
-                    "n_cells": int(n_cells),
-                })
-    
-                # collect obs streams
-                obs_pref, c_pref = self._uq_collect_obs_for_version(
-                    int(v), imtU,
-                    measurement_sigma=measurement_sigma,
-                    include_weights=True,
-                    prefer_domain=True,
-                    allow_fallback=True,
-                    measurement_sigma_instr=measurement_sigma_instr,
-                    measurement_sigma_dyfi=measurement_sigma_dyfi,
-                    attach_per_obs_sigma=True,
-                )
-    
-                obs_mix, c_mix = self._uq_collect_obs_for_version(
-                    int(v), imtU,
-                    measurement_sigma=measurement_sigma,
-                    include_weights=True,
-                    prefer_domain=False,
-                    allow_fallback=True,
-                    measurement_sigma_instr=measurement_sigma_instr,
-                    measurement_sigma_dyfi=measurement_sigma_dyfi,
-                    attach_per_obs_sigma=True,
-                )
-    
-                # 2) bayes (domain-preferred)
-                if "bayes" in compute:
-                    if c_pref.get("total", 0) == 0:
-                        mean_b, sig_b, s_ep_b_t = mu0_lin_t, sig0_raw_t, s_ep0_t
-                    else:
-                        mu_b_ws, s_ep_b = self._uq_bayes_local_posterior_at_mask(
-                            mu0_ws, s_ep0, s_a0,
-                            lat2d, lon2d, mask, [o.copy() for o in obs_pref],
-                            update_radius_km=update_radius_km,
-                            kernel=kernel,
-                            kernel_scale_km=kernel_scale_km,
-                            measurement_sigma=measurement_sigma,
-                        )
-                        mu_b_lin = self._uq_mu_from_ws(imtU, mu_b_ws)
-                        mean_b = self._uq_agg(mu_b_lin[mask], agg=agg_effective)
-                        s_ep_b_t = self._uq_agg(s_ep_b[mask], agg=agg_effective)
-                        sig_b = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep_b_t) ** 2)))
-    
-                    rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "target_type": ttype,
-                        "version": int(v),
-                        "imt": imtU,
-                        "method": "bayes",
-                        "mean_predicted": float(mean_b),
-                        "sigma_total_predicted": float(sig_b),
-                        "sigma_epistemic_predicted": float(s_ep_b_t),
-                        "sigma_aleatoric_used": float(s_a0_t),
-                        "n_obs_total": int(c_pref.get("total", 0)),
-                        "n_obs_seismic": int(c_pref.get("seismic", 0)),
-                        "n_obs_intensity": int(c_pref.get("intensity", 0)),
-                        "n_obs_unknown": int(c_pref.get("unknown", 0)),
-                        "n_cells": int(n_cells),
-                    })
-    
-                # 3) bayes_2lik (mixed obs + per-observation meas_var)
-                if "bayes_2lik" in compute:
-                    if c_mix.get("total", 0) == 0:
-                        mean2, sig2, s_ep2_t = mu0_lin_t, sig0_raw_t, s_ep0_t
-                    else:
-                        mu2_ws, s_ep2 = self._uq_bayes_local_posterior_at_mask(
-                            mu0_ws, s_ep0, s_a0,
-                            lat2d, lon2d, mask, [o.copy() for o in obs_mix],
-                            update_radius_km=update_radius_km,
-                            kernel=kernel,
-                            kernel_scale_km=kernel_scale_km,
-                            measurement_sigma=measurement_sigma,  # fallback only
-                        )
-                        mu2_lin = self._uq_mu_from_ws(imtU, mu2_ws)
-                        mean2 = self._uq_agg(mu2_lin[mask], agg=agg_effective)
-                        s_ep2_t = self._uq_agg(s_ep2[mask], agg=agg_effective)
-                        sig2 = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep2_t) ** 2)))
-    
-                    rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "target_type": ttype,
-                        "version": int(v),
-                        "imt": imtU,
-                        "method": "bayes_2lik",
-                        "mean_predicted": float(mean2),
-                        "sigma_total_predicted": float(sig2),
-                        "sigma_epistemic_predicted": float(s_ep2_t),
-                        "sigma_aleatoric_used": float(s_a0_t),
-                        "n_obs_total": int(c_mix.get("total", 0)),
-                        "n_obs_seismic": int(c_mix.get("seismic", 0)),
-                        "n_obs_intensity": int(c_mix.get("intensity", 0)),
-                        "n_obs_unknown": int(c_mix.get("unknown", 0)),
-                        "n_cells": int(n_cells),
-                    })
-    
-                # 4) dyfi_weighted (same as bayes_2lik but DYFI weights boosted)
-                if "dyfi_weighted" in compute:
-                    obs_w = self._uq_apply_dyfi_weights(
-                        [o.copy() for o in obs_mix],
-                        mode=dyfi_weight_mode,
-                        w_max=dyfi_w_max,
-                    )
-                    if c_mix.get("total", 0) == 0:
-                        meanw, sigw, s_epw_t = mu0_lin_t, sig0_raw_t, s_ep0_t
-                    else:
-                        muw_ws, s_epw = self._uq_bayes_local_posterior_at_mask(
-                            mu0_ws, s_ep0, s_a0,
-                            lat2d, lon2d, mask, obs_w,
-                            update_radius_km=update_radius_km,
-                            kernel=kernel,
-                            kernel_scale_km=kernel_scale_km,
-                            measurement_sigma=measurement_sigma,
-                        )
-                        muw_lin = self._uq_mu_from_ws(imtU, muw_ws)
-                        meanw = self._uq_agg(muw_lin[mask], agg=agg_effective)
-                        s_epw_t = self._uq_agg(s_epw[mask], agg=agg_effective)
-                        sigw = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_epw_t) ** 2)))
-    
-                    rows.append({
-                        "target_id": t.get("id", "GLOBAL"),
-                        "target_type": ttype,
-                        "version": int(v),
-                        "imt": imtU,
-                        "method": "dyfi_weighted",
-                        "mean_predicted": float(meanw),
-                        "sigma_total_predicted": float(sigw),
-                        "sigma_epistemic_predicted": float(s_epw_t),
-                        "sigma_aleatoric_used": float(s_a0_t),
-                        "n_obs_total": int(c_mix.get("total", 0)),
-                        "n_obs_seismic": int(c_mix.get("seismic", 0)),
-                        "n_obs_intensity": int(c_mix.get("intensity", 0)),
-                        "n_obs_unknown": int(c_mix.get("unknown", 0)),
-                        "n_cells": int(n_cells),
-                    })
-    
-        return pd.DataFrame(rows)
-    
-    
-    def uq_plot_targets_decay(
-        self,
-        *,
-        version_list,
-        imt="MMI",
-        points=None,
-        areas=None,
-        what="sigma_total_predicted",
-        methods=("ShakeMap", "bayes", "bayes_2lik"),
-        agg="mean",
-        global_stat=None,
-        prior_version=None,
-        sigma_total_from_shakemap=True,
-        sigma_aleatory=None,
-        update_radius_km=30.0,
-        kernel="gaussian",
-        kernel_scale_km=20.0,
-        measurement_sigma=0.30,
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        # dyfi weighting method args
-        dyfi_weight_mode="sqrt_nresp",
-        dyfi_w_max=10.0,
-        # grid
-        grid_res=None,
-        interp_method="nearest",
-        interp_kwargs=None,
-        # plotting
-        figsize=(10, 5),
-        dpi=150,
-        xrotation=0,
-        title=None,
-        output_path=None,
-        save=True,
-        save_formats=("png",),
-        show=False,
-        plot_combined=True,
-        combined_figsize=(11, 6),
-        combined_legend_ncol=2,
-        audit=True,
-        audit_output_path=None,
-        audit_prefix=None,
-    ):
-        """
-        Plot target decay curves for points/areas.
-        Returns a single long-form DataFrame (target_id, version, method, ...).
-        """
-        import numpy as np
-        import matplotlib.pyplot as plt
-    
-        imtU = str(imt).upper().strip()
-        versions = sorted([int(v) for v in version_list])
-    
-        # extract
-        df = self.uq_extract_target_series(
-            version_list=versions,
-            imt=imtU,
-            points=points,
-            areas=areas,
-            agg=agg,
-            global_stat=global_stat,
-            sigma_total_from_shakemap=sigma_total_from_shakemap,
-            sigma_aleatory=sigma_aleatory,
-            prior_version=prior_version,
-            update_radius_km=update_radius_km,
-            kernel=kernel,
-            kernel_scale_km=kernel_scale_km,
-            measurement_sigma=measurement_sigma,
-            measurement_sigma_instr=measurement_sigma_instr,
-            measurement_sigma_dyfi=measurement_sigma_dyfi,
-            dyfi_weight_mode=dyfi_weight_mode,
-            dyfi_w_max=dyfi_w_max,
-            grid_res=grid_res,
-            interp_method=interp_method,
-            interp_kwargs=interp_kwargs,
-            methods_to_compute=methods,
-            audit=audit,
-            audit_output_path=audit_output_path,
-            audit_prefix=audit_prefix,
-        )
-    
-        # plot per-target
-        targets = sorted(df["target_id"].unique().tolist())
-        for tid in targets:
-            sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
-            if sub.empty:
-                continue
-            sub = sub.sort_values(["version", "method"])
-    
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    
-            for m in methods:
-                s = sub[sub["method"] == m].sort_values("version")
-                if s.empty:
-                    continue
-                ax.plot(s["version"].values, s[what].values, marker="o", linewidth=1.5, label=str(m))
-    
-            ax.set_xlabel("ShakeMap version")
-            ax.set_ylabel(str(what))
-            ax.tick_params(axis="x", rotation=float(xrotation))
-            ax.grid(True, alpha=0.3)
-    
-            ttl = title if title is not None else f"{imtU} target decay @ {tid} ({what})"
-            ax.set_title(ttl)
-    
-            ax.legend()
-    
-            fig.tight_layout()
-    
-            if save and (output_path is not None):
-                self._uq_save_figure_safe(
-                    fig,
-                    fname_stem=f"UQ-TargetDecay-{imtU}-{tid}-{what}",
-                    subdir="uq_plots/targets_decay",
-                    output_path=output_path,
-                    save_formats=save_formats,
-                    dpi=dpi,
-                )
-    
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
-    
-        # combined plot (all targets in one)
-        if plot_combined and len(targets) > 0:
-            fig, ax = plt.subplots(figsize=combined_figsize, dpi=dpi)
-    
-            for tid in targets:
-                sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
-                if sub.empty:
-                    continue
-                for m in methods:
-                    s = sub[sub["method"] == m].sort_values("version")
-                    if s.empty:
-                        continue
-                    ax.plot(
-                        s["version"].values,
-                        s[what].values,
-                        marker="o",
-                        linewidth=1.2,
-                        label=f"{tid} — {m}",
-                    )
-    
-            ax.set_xlabel("ShakeMap version")
-            ax.set_ylabel(str(what))
-            ax.tick_params(axis="x", rotation=float(xrotation))
-            ax.grid(True, alpha=0.3)
-            ax.set_title(f"{imtU} combined targets decay ({what})")
-            ax.legend(ncol=int(combined_legend_ncol))
-    
-            fig.tight_layout()
-    
-            if save and (output_path is not None):
-                self._uq_save_figure_safe(
-                    fig,
-                    fname_stem=f"UQ-TargetDecay-COMBINED-{imtU}-{what}",
-                    subdir="uq_plots/targets_decay",
-                    output_path=output_path,
-                    save_formats=save_formats,
-                    dpi=dpi,
-                )
-    
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
-    
-        return df
-    
-    # ======================================================================
-    # END PATCH v26.7
-    # ======================================================================
-
 
     # ==========================================================
     # PATCH v26.8 — CDI-aware DYFI stream + per-version timestamp helper
@@ -9962,107 +8263,9 @@ class SHAKEuq:
         return obs, counts
     
     
-    def _uq_collect_obs_for_version(
-        self,
-        version,
-        imtU,
-        measurement_sigma=0.30,
-        include_weights=True,
-        prefer_domain=True,
-        allow_fallback=True,
-        # --- existing Step-4 kwargs (keep) ---
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        attach_per_obs_sigma=False,
-        # --- NEW: DYFI source selection ---
-        dyfi_source=None,   # None -> use self.dyfi_source ; "stationlist"|"cdi"|"auto"
-    ):
-        """
-        Override wrapper with CDI switching (safe defaults).
-        - If dyfi_source resolves to "stationlist": behave exactly like current implementation.
-        - If dyfi_source resolves to "cdi": use CDI obs for intensity domain (MMI only).
-        - If "auto": use stationlist early; CDI after dyfi_use_after_hours.
-        """
-        # keep behavior for all non-intensity IMTs unless caller explicitly forces CDI
-        src = str(dyfi_source).lower().strip() if dyfi_source is not None else str(getattr(self, "dyfi_source", "stationlist")).lower().strip()
-    
-        # AUTO -> decide by version time
-        if src == "auto":
-            try:
-                use_cdi = self._uq_is_cdi_available_for_version(int(version))
-            except Exception:
-                use_cdi = False
-            src_eff = "cdi" if use_cdi else "stationlist"
-        else:
-            src_eff = src
-    
-        # If CDI requested and IMT is intensity, return CDI obs
-        if src_eff == "cdi" and str(imtU).upper().strip() in ("MMI", "INTENSITY"):
-            return self._uq_collect_dyfi_cdi_obs(
-                imtU=str(imtU).upper().strip(),
-                measurement_sigma=float(measurement_sigma),
-                measurement_sigma_dyfi=measurement_sigma_dyfi,
-                attach_per_obs_sigma=bool(attach_per_obs_sigma),
-                include_weights=bool(include_weights),
-            )
-    
-        # Otherwise fall back to your previous collector (renamed here as _uq_collect_obs_for_version_legacy if you have it)
-        # If you already have the prior implementation named exactly _uq_collect_obs_for_version,
-        # we need to call the NEXT best internal function. Most clean builds have:
-        #   - _uq_collect_observations_for_version
-        #   - or _uq_collect_stationlist_for_version
-        # We’ll try those in order.
-    
-        # Try: _uq_collect_observations_for_version(...)
-        if hasattr(self, "_uq_collect_observations_for_version"):
-            return self._uq_collect_observations_for_version(
-                int(version),
-                str(imtU).upper().strip(),
-                measurement_sigma=measurement_sigma,
-                include_weights=include_weights,
-                prefer_domain=prefer_domain,
-                allow_fallback=allow_fallback,
-                measurement_sigma_instr=measurement_sigma_instr,
-                measurement_sigma_dyfi=measurement_sigma_dyfi,
-                attach_per_obs_sigma=attach_per_obs_sigma,
-            )
-    
-        # Try: _uq_collect_stationlist_obs_for_version(...)
-        if hasattr(self, "_uq_collect_stationlist_obs_for_version"):
-            return self._uq_collect_stationlist_obs_for_version(
-                int(version),
-                str(imtU).upper().strip(),
-                measurement_sigma=measurement_sigma,
-                include_weights=include_weights,
-                prefer_domain=prefer_domain,
-                allow_fallback=allow_fallback,
-                measurement_sigma_instr=measurement_sigma_instr,
-                measurement_sigma_dyfi=measurement_sigma_dyfi,
-                attach_per_obs_sigma=attach_per_obs_sigma,
-            )
-    
-        # Last resort: if no internal collector exists, raise a clear error
-        raise AttributeError(
-            "CDI patch: could not find underlying stationlist collector. "
-            "Expected one of: _uq_collect_observations_for_version, _uq_collect_stationlist_obs_for_version."
-        )
 
 
-    # ======================================================================
-    # PATCH v26.8 hotfix: CDI wrapper fallback + stationlist adapter
-    # Fixes: AttributeError "could not find underlying stationlist collector"
-    # ======================================================================
-    
-    def _uq_infer_obs_domain(self, imtU: str) -> str:
-        """
-        Preferred observation domain for an IMT.
-          - MMI -> intensity
-          - PGA/PGV/SA* -> seismic
-        """
-        s = str(imtU).upper().strip()
-        if s in ("MMI", "INTENSITY"):
-            return "intensity"
-        return "seismic"
+
     
     
     def _uq_collect_stationlist_obs_for_version(
@@ -10185,74 +8388,6 @@ class SHAKEuq:
         return obs_all, counts_all
     
     
-    def _uq_collect_obs_for_version(
-        self,
-        version,
-        imtU,
-        measurement_sigma=0.30,
-        include_weights=True,
-        prefer_domain=True,
-        allow_fallback=True,
-        measurement_sigma_instr=None,
-        measurement_sigma_dyfi=None,
-        attach_per_obs_sigma=False,
-        dyfi_source=None,  # None -> use self.dyfi_source ; "stationlist"|"cdi"|"auto"
-    ):
-        """
-        CDI-aware wrapper with SAFE stationlist fallback.
-    
-        dyfi_source resolution:
-          - "stationlist": always stationlist-based DYFI (from version stationlist)
-          - "cdi": use CDI file for MMI (if implemented), else fallback to stationlist
-          - "auto": stationlist early; CDI after dyfi_use_after_hours (if implemented), else stationlist
-        """
-        src = (
-            str(dyfi_source).lower().strip()
-            if dyfi_source is not None
-            else str(getattr(self, "dyfi_source", "stationlist")).lower().strip()
-        )
-        imtU = str(imtU).upper().strip()
-    
-        # decide effective source for "auto"
-        if src == "auto":
-            use_cdi = False
-            if hasattr(self, "_uq_is_cdi_available_for_version"):
-                try:
-                    use_cdi = bool(self._uq_is_cdi_available_for_version(int(version)))
-                except Exception:
-                    use_cdi = False
-            src_eff = "cdi" if use_cdi else "stationlist"
-        else:
-            src_eff = src
-    
-        # CDI branch (MMI only)
-        if src_eff == "cdi" and imtU in ("MMI", "INTENSITY"):
-            if hasattr(self, "_uq_collect_dyfi_cdi_obs"):
-                return self._uq_collect_dyfi_cdi_obs(
-                    imtU=imtU,
-                    measurement_sigma=float(measurement_sigma),
-                    measurement_sigma_dyfi=measurement_sigma_dyfi,
-                    attach_per_obs_sigma=bool(attach_per_obs_sigma),
-                    include_weights=bool(include_weights),
-                )
-            # If CDI not implemented, fall through to stationlist safely.
-    
-        # ALWAYS: stationlist fallback through adapter (this is the fix)
-        return self._uq_collect_stationlist_obs_for_version(
-            int(version),
-            imtU,
-            measurement_sigma=measurement_sigma,
-            include_weights=include_weights,
-            prefer_domain=prefer_domain,
-            allow_fallback=allow_fallback,
-            measurement_sigma_instr=measurement_sigma_instr,
-            measurement_sigma_dyfi=measurement_sigma_dyfi,
-            attach_per_obs_sigma=attach_per_obs_sigma,
-        )
-
-
-
-
 
 
 
@@ -10296,129 +8431,2168 @@ class SHAKEuq:
 
 
 
-def _uq_get_obs_for_method(
-    self,
-    version,
-    imtU,
-    method,
-    measurement_sigma=0.30,
-    measurement_sigma_instr=None,
-    measurement_sigma_dyfi=None,
-):
-    """
-    Centralized obs selection for UQ methods.
-    Ensures CDI/stationlist switching is honored via self.dyfi_source.
-    """
-    imtU = str(imtU).upper().strip()
-    m = str(method).lower().strip()
-
-    # bayes: keep legacy prefer_domain=True behavior
-    if m == "bayes":
-        obs, c = self._uq_collect_obs_for_version(
-            int(version), imtU,
-            measurement_sigma=measurement_sigma,
-            include_weights=True,
-            prefer_domain=True,
-            allow_fallback=True,
-            measurement_sigma_instr=measurement_sigma_instr,
-            measurement_sigma_dyfi=measurement_sigma_dyfi,
-            attach_per_obs_sigma=False,
-        )
-        return obs, c
-
-    # bayes_2lik + dyfi_weighted: mixed stream + per-obs sigma + DYFI source policy
-    if m in ("bayes_2lik", "dyfi_weighted"):
-        obs, c = self._uq_collect_obs_for_version(
-            int(version), imtU,
-            measurement_sigma=measurement_sigma,
-            include_weights=True,
-            prefer_domain=False,
-            allow_fallback=True,
-            measurement_sigma_instr=measurement_sigma_instr,
-            measurement_sigma_dyfi=measurement_sigma_dyfi,
-            attach_per_obs_sigma=True,
-            dyfi_source=getattr(self, "dyfi_source", "stationlist"),
-        )
-        return obs, c
-
-    # default: no obs
-    return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
-
-
-    def uq_extract_target_series(self, *args, **kwargs):
+    def _uq_get_obs_for_method(
+        self,
+        version,
+        imtU,
+        method,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+    ):
         """
-        Wrapper override:
-          - calls your existing uq_extract_target_series (renamed internally) if present
-          - then recomputes bayes/bayes_2lik/dyfi_weighted rows using the NEW obs selector
+        Centralized obs selection for UQ methods.
+        Ensures CDI/stationlist switching is honored via self.dyfi_source.
+        """
+        imtU = str(imtU).upper().strip()
+        m = str(method).lower().strip()
     
-        This makes CDI switching take effect without rewriting your whole pipeline.
+        # bayes: keep legacy prefer_domain=True behavior
+        if m == "bayes":
+            obs, c = self._uq_collect_obs_for_version(
+                int(version), imtU,
+                measurement_sigma=measurement_sigma,
+                include_weights=True,
+                prefer_domain=True,
+                allow_fallback=True,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                attach_per_obs_sigma=False,
+            )
+            return obs, c
+    
+        # bayes_2lik + dyfi_weighted: mixed stream + per-obs sigma + DYFI source policy
+        if m in ("bayes_2lik", "dyfi_weighted"):
+            obs, c = self._uq_collect_obs_for_version(
+                int(version), imtU,
+                measurement_sigma=measurement_sigma,
+                include_weights=True,
+                prefer_domain=False,
+                allow_fallback=True,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                attach_per_obs_sigma=True,
+                dyfi_source=getattr(self, "dyfi_source", "stationlist"),
+            )
+            return obs, c
+    
+        # default: no obs
+        return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+
+
+    
+
+
+
+    # ==========================================================
+    # PATCH v26.8+ — dyfi_source override + CDI switching helpers
+    # Paste at END of SHAKEuq class (last definition wins).
+    # ==========================================================
+    
+    def uq_extract_target_series(
+        self,
+        version_list,
+        imt="MMI",
+        points=None,
+        areas=None,
+        agg="mean",
+        global_stat=None,
+        sigma_total_from_shakemap=True,
+        sigma_aleatory=None,
+        prior_version=None,
+        update_radius_km=30.0,
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        # dyfi weighting method
+        dyfi_weight_mode="sqrt_nresp",
+        dyfi_w_max=10.0,
+        # unified grid controls
+        grid_res=None,
+        interp_method="nearest",
+        interp_kwargs=None,
+        # Option B safety
+        methods_to_compute=None,
+        # audit
+        audit=True,
+        audit_output_path=None,
+        audit_prefix=None,
+        # NEW: DYFI source override for CDI switching
+        dyfi_source=None,
+    ):
+        """
+        Target series extraction:
+          - ShakeMap (published): mean & sigma_total from file-derived unified grid
+          - bayes: v0 prior + domain-preferred obs (prefer_domain=True)
+          - bayes_2lik: v0 prior + mixed obs with per-observation meas_var (prefer_domain=False)
+          - dyfi_weighted: same as bayes_2lik but DYFI weights applied (nresp-based)
+          - dyfi_source: override for stationlist/cdi/auto switching
         """
         import numpy as np
         import pandas as pd
     
-        # ---- call the original (the one currently in your module) ----
-        # We need a handle to it. When you paste this patch, rename your existing
-        # uq_extract_target_series to _uq_extract_target_series_base ONCE.
-        if not hasattr(self, "_uq_extract_target_series_base"):
-            raise AttributeError(
-                "Expected self._uq_extract_target_series_base to exist. "
-                "Rename your current uq_extract_target_series to _uq_extract_target_series_base once, "
-                "then keep this override."
-            )
+        def _norm_method(m):
+            s = str(m).strip()
+            return "ShakeMap" if s.lower() == "published" else s
     
-        df = self._uq_extract_target_series_base(*args, **kwargs)
-        if df is None or len(df) == 0:
-            return df
-    
-        # ---- pull parameters we need from kwargs (match your signatures) ----
-        version_list = kwargs.get("version_list", None)
-        imt = kwargs.get("imt", "MMI")
-        measurement_sigma = float(kwargs.get("measurement_sigma", 0.30))
-        measurement_sigma_instr = kwargs.get("measurement_sigma_instr", None)
-        measurement_sigma_dyfi = kwargs.get("measurement_sigma_dyfi", None)
-    
-        # only do anything if these methods are requested
-        methods_to_compute = kwargs.get("methods_to_compute", None)
         if methods_to_compute is None:
-            return df
-        want = set([str(m).strip() for m in methods_to_compute])
-        need = set(["bayes", "bayes_2lik", "dyfi_weighted"]) & set([s.lower() for s in want])
-        if not need:
-            return df
+            compute = {"ShakeMap", "bayes", "bayes_2lik", "dyfi_weighted"}
+        else:
+            compute = {_norm_method(m) for m in methods_to_compute}
+            compute.add("ShakeMap")
     
         imtU = str(imt).upper().strip()
-        versions = sorted([int(v) for v in (version_list if version_list is not None else df["version"].unique())])
+        versions = sorted([int(v) for v in version_list])
     
-        # We’ll recompute just a diagnostic “n_obs_*” replacement to prove stream switching,
-        # without altering means/sigmas if your base already computed them.
-        # (This keeps risk low while proving CDI usage.)
-        # If you want, we can extend this to recompute actual posteriors later.
-        df2 = df.copy()
+        # targets
+        if global_stat is not None:
+            gs = str(global_stat).lower().strip()
+            gid = f"GLOBAL_{gs.replace(' ', '_')}".replace("__", "_")
+            targets = [{"id": gid, "type": "global"}]
+        else:
+            targets = self._uq_parse_targets(points=points, areas=areas)
     
-        # map rows by (method, version, target_id)
-        for method in ["bayes", "bayes_2lik", "dyfi_weighted"]:
-            if method not in [m.lower() for m in want]:
-                continue
+        # ---- local helper: dyfi weights on obs list (by nresp if present) ----
+        def _apply_dyfi_weights(obs_list, mode, w_max):
+            """
+            mode:
+              - "none": w=1
+              - "sqrt_nresp": w=min(w_max, sqrt(max(1,nresp))) for intensity dyfi obs
+              - "nresp_threshold": use self._uq_dyfi_weight_from_row (if exists)
+            """
+            m = str(mode).lower().strip() if mode is not None else "sqrt_nresp"
+            wmax = float(w_max) if w_max is not None else 10.0
+            for o in (obs_list or []):
+                try:
+                    dom = str(o.get("domain", "")).lower().strip()
+                    src = str(o.get("source", "")).lower().strip()
+                except Exception:
+                    dom, src = "", ""
+                if dom != "intensity":
+                    continue
+                # only try to weight DYFI-like intensity; keep other intensity obs unchanged
+                if ("dyfi" not in src) and ("dyfi" not in str(o.get("type", "")).lower()):
+                    continue
+    
+                if m == "none":
+                    o["w"] = 1.0
+                    continue
+    
+                nresp = o.get("nresp", None)
+                try:
+                    n = float(nresp) if nresp is not None else np.nan
+                except Exception:
+                    n = np.nan
+    
+                if m == "sqrt_nresp":
+                    if np.isfinite(n):
+                        o["w"] = float(min(wmax, np.sqrt(max(1.0, n))))
+                    else:
+                        o["w"] = float(o.get("w", 1.0))
+                    continue
+    
+                # fallback: threshold rule if helper exists
+                if hasattr(self, "_uq_dyfi_weight_from_row"):
+                    try:
+                        o["w"] = float(self._uq_dyfi_weight_from_row(n))
+                    except Exception:
+                        o["w"] = float(o.get("w", 1.0))
+    
+        rows = []
+    
+        for t in targets:
+            ttype = str(t.get("type", "point")).lower().strip()
     
             for v in versions:
-                obs, c = self._uq_get_obs_for_method(
-                    v, imtU, method,
-                    measurement_sigma=measurement_sigma,
-                    measurement_sigma_instr=measurement_sigma_instr,
-                    measurement_sigma_dyfi=measurement_sigma_dyfi,
+                # --- unified target extraction (must exist in your class) ---
+                # expected return:
+                #   mu_v_lin, sig_v_raw, mu0_lin_t, sig0_raw_t, s_ep0_t, s_a0_t, lat2d, lon2d, mask, n_cells
+                (
+                    mu_v_lin,
+                    sig_v_raw,
+                    mu0_lin_t,
+                    sig0_raw_t,
+                    s_ep0_t,
+                    s_a0_t,
+                    lat2d,
+                    lon2d,
+                    mask,
+                    n_cells,
+                ) = self._uq_get_unified_for_version_target(
+                    int(v),
+                    imtU,
+                    t,
+                    grid_res=grid_res,
+                    interp_method=interp_method,
+                    interp_kwargs=interp_kwargs,
+                    sigma_total_from_shakemap=sigma_total_from_shakemap,
+                    sigma_aleatory=sigma_aleatory,
+                    prior_version=prior_version,
+                    audit=audit,
+                    audit_output_path=audit_output_path,
+                    audit_prefix=audit_prefix,
                 )
     
-                # debug signature (prints once per version/method)
-                self._uq_debug_obs_signature(obs, label=f"{method} v{int(v):03d} dyfi_source={getattr(self,'dyfi_source','?')}")
+                # aggregate
+                agg_effective = agg
+                mean_pub = self._uq_agg(mu_v_lin[mask], agg=agg_effective)
+                sig_pub = self._uq_agg(sig_v_raw[mask], agg=agg_effective)
     
-                # update df counts for all targets for this method+version
-                msk = (df2["version"].astype(int) == int(v)) & (df2["method"].astype(str).str.lower() == method)
-                if msk.any():
-                    df2.loc[msk, "n_obs_total"] = int(c.get("total", 0))
-                    df2.loc[msk, "n_obs_seismic"] = int(c.get("seismic", 0))
-                    df2.loc[msk, "n_obs_intensity"] = int(c.get("intensity", 0))
-                    df2.loc[msk, "n_obs_unknown"] = int(c.get("unknown", 0))
+                # 1) published
+                rows.append(
+                    {
+                        "target_id": t.get("id", "GLOBAL"),
+                        "target_type": ttype,
+                        "version": int(v),
+                        "imt": imtU,
+                        "method": "ShakeMap",
+                        "mean_predicted": float(mean_pub),
+                        "sigma_total_predicted": float(sig_pub),
+                        "sigma_epistemic_predicted": np.nan,
+                        "sigma_aleatoric_used": np.nan,
+                        "n_obs_total": 0,
+                        "n_obs_seismic": 0,
+                        "n_obs_intensity": 0,
+                        "n_obs_unknown": 0,
+                        "n_cells": int(n_cells),
+                    }
+                )
     
-        return df2
+                # priors in WS-space for local updates
+                mu0_ws = self._uq_mu_to_ws(imtU, mu_v_lin)  # same grid as mu_v_lin
+                mu0_ws_t = self._uq_mu_to_ws(imtU, np.array([mu0_lin_t], dtype=float))[0]
+                s_ep0 = sig0_raw_t * 0.0 + float(s_ep0_t)  # broadcast-like
+                s_a0 = sig0_raw_t * 0.0 + float(s_a0_t)
     
+                # --- collect obs streams (NEW: dyfi_source pass-through) ---
+                obs_pref, c_pref = self._uq_collect_obs_for_version(
+                    int(v),
+                    imtU,
+                    measurement_sigma=measurement_sigma,
+                    include_weights=True,
+                    prefer_domain=True,
+                    allow_fallback=True,
+                    measurement_sigma_instr=measurement_sigma_instr,
+                    measurement_sigma_dyfi=measurement_sigma_dyfi,
+                    attach_per_obs_sigma=True,
+                    dyfi_source=dyfi_source,
+                )
+    
+                obs_mix, c_mix = self._uq_collect_obs_for_version(
+                    int(v),
+                    imtU,
+                    measurement_sigma=measurement_sigma,
+                    include_weights=True,
+                    prefer_domain=False,
+                    allow_fallback=True,
+                    measurement_sigma_instr=measurement_sigma_instr,
+                    measurement_sigma_dyfi=measurement_sigma_dyfi,
+                    attach_per_obs_sigma=True,
+                    dyfi_source=dyfi_source,
+                )
+    
+                # debug signatures (optional)
+                if getattr(self, "debug_uq", False) or getattr(self, "uq_debug", False):
+                    if hasattr(self, "_uq_debug_obs_signature"):
+                        try:
+                            self._uq_debug_obs_signature(
+                                obs_pref,
+                                label=f"bayes v{int(v):03d} dyfi_source={dyfi_source or getattr(self,'dyfi_source','stationlist')}",
+                            )
+                            self._uq_debug_obs_signature(
+                                obs_mix,
+                                label=f"bayes_2lik v{int(v):03d} dyfi_source={dyfi_source or getattr(self,'dyfi_source','stationlist')}",
+                            )
+                        except Exception:
+                            pass
+    
+                # 2) bayes (domain-preferred)
+                if "bayes" in compute:
+                    if c_pref.get("total", 0) == 0:
+                        mean_b, sig_b, s_ep_b_t = float(mu0_lin_t), float(sig0_raw_t), float(s_ep0_t)
+                    else:
+                        mu_b_ws, s_ep_b = self._uq_bayes_local_posterior_at_mask(
+                            mu0_ws,
+                            float(s_ep0_t),
+                            float(s_a0_t),
+                            lat2d,
+                            lon2d,
+                            mask,
+                            [o.copy() for o in obs_pref],
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,
+                        )
+                        mu_b_lin = self._uq_mu_from_ws(imtU, mu_b_ws)
+                        mean_b = self._uq_agg(mu_b_lin[mask], agg=agg_effective)
+                        s_ep_b_t = self._uq_agg(s_ep_b[mask], agg=agg_effective)
+                        sig_b = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep_b_t) ** 2)))
+    
+                    rows.append(
+                        {
+                            "target_id": t.get("id", "GLOBAL"),
+                            "target_type": ttype,
+                            "version": int(v),
+                            "imt": imtU,
+                            "method": "bayes",
+                            "mean_predicted": float(mean_b),
+                            "sigma_total_predicted": float(sig_b),
+                            "sigma_epistemic_predicted": float(s_ep_b_t),
+                            "sigma_aleatoric_used": float(s_a0_t),
+                            "n_obs_total": int(c_pref.get("total", 0)),
+                            "n_obs_seismic": int(c_pref.get("seismic", 0)),
+                            "n_obs_intensity": int(c_pref.get("intensity", 0)),
+                            "n_obs_unknown": int(c_pref.get("unknown", 0)),
+                            "n_cells": int(n_cells),
+                        }
+                    )
+    
+                # 3) bayes_2lik (mixed obs, per-observation meas_var if present)
+                if "bayes_2lik" in compute:
+                    if c_mix.get("total", 0) == 0:
+                        mean2, sig2, s_ep2_t = float(mu0_lin_t), float(sig0_raw_t), float(s_ep0_t)
+                    else:
+                        mu2_ws, s_ep2 = self._uq_bayes_local_posterior_2lik_at_mask(
+                            mu0_ws,
+                            float(s_ep0_t),
+                            float(s_a0_t),
+                            lat2d,
+                            lon2d,
+                            mask,
+                            [o.copy() for o in obs_mix],
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,
+                        )
+                        mu2_lin = self._uq_mu_from_ws(imtU, mu2_ws)
+                        mean2 = self._uq_agg(mu2_lin[mask], agg=agg_effective)
+                        s_ep2_t = self._uq_agg(s_ep2[mask], agg=agg_effective)
+                        sig2 = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep2_t) ** 2)))
+    
+                    rows.append(
+                        {
+                            "target_id": t.get("id", "GLOBAL"),
+                            "target_type": ttype,
+                            "version": int(v),
+                            "imt": imtU,
+                            "method": "bayes_2lik",
+                            "mean_predicted": float(mean2),
+                            "sigma_total_predicted": float(sig2),
+                            "sigma_epistemic_predicted": float(s_ep2_t),
+                            "sigma_aleatoric_used": float(s_a0_t),
+                            "n_obs_total": int(c_mix.get("total", 0)),
+                            "n_obs_seismic": int(c_mix.get("seismic", 0)),
+                            "n_obs_intensity": int(c_mix.get("intensity", 0)),
+                            "n_obs_unknown": int(c_mix.get("unknown", 0)),
+                            "n_cells": int(n_cells),
+                        }
+                    )
+    
+                # 4) dyfi_weighted (same as bayes_2lik but reweight DYFI intensity obs)
+                if "dyfi_weighted" in compute:
+                    if c_mix.get("total", 0) == 0:
+                        meanw, sigw, s_epw_t = float(mu0_lin_t), float(sig0_raw_t), float(s_ep0_t)
+                    else:
+                        obs_w = [o.copy() for o in obs_mix]
+                        _apply_dyfi_weights(obs_w, dyfi_weight_mode, dyfi_w_max)
+    
+                        muw_ws, s_epw = self._uq_dyfi_weighted_posterior_at_mask(
+                            mu0_ws,
+                            float(s_ep0_t),
+                            float(s_a0_t),
+                            lat2d,
+                            lon2d,
+                            mask,
+                            obs_w,
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,
+                        )
+                        muw_lin = self._uq_mu_from_ws(imtU, muw_ws)
+                        meanw = self._uq_agg(muw_lin[mask], agg=agg_effective)
+                        s_epw_t = self._uq_agg(s_epw[mask], agg=agg_effective)
+                        sigw = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_epw_t) ** 2)))
+    
+                    rows.append(
+                        {
+                            "target_id": t.get("id", "GLOBAL"),
+                            "target_type": ttype,
+                            "version": int(v),
+                            "imt": imtU,
+                            "method": "dyfi_weighted",
+                            "mean_predicted": float(meanw),
+                            "sigma_total_predicted": float(sigw),
+                            "sigma_epistemic_predicted": float(s_epw_t),
+                            "sigma_aleatoric_used": float(s_a0_t),
+                            "n_obs_total": int(c_mix.get("total", 0)),
+                            "n_obs_seismic": int(c_mix.get("seismic", 0)),
+                            "n_obs_intensity": int(c_mix.get("intensity", 0)),
+                            "n_obs_unknown": int(c_mix.get("unknown", 0)),
+                            "n_cells": int(n_cells),
+                        }
+                    )
+    
+        return pd.DataFrame(rows)
+    
+    
+    def uq_plot_targets_decay(
+        self,
+        *,
+        version_list,
+        imt="MMI",
+        points=None,
+        areas=None,
+        what="sigma_total_predicted",
+        methods=("ShakeMap", "bayes", "bayes_2lik"),
+        agg="mean",
+        global_stat=None,
+        prior_version=None,
+        sigma_total_from_shakemap=True,
+        sigma_aleatory=None,
+        update_radius_km=30.0,
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        # dyfi weighting method args
+        dyfi_weight_mode="sqrt_nresp",
+        dyfi_w_max=10.0,
+        # grid
+        grid_res=None,
+        interp_method="nearest",
+        interp_kwargs=None,
+        # plotting
+        figsize=(10, 5),
+        dpi=150,
+        xrotation=0,
+        title=None,
+        output_path=None,
+        save=True,
+        save_formats=("png",),
+        show=False,
+        plot_combined=True,
+        combined_figsize=(11, 6),
+        combined_legend_ncol=2,
+        audit=True,
+        audit_output_path=None,
+        audit_prefix=None,
+        dyfi_source=None,
+    ):
+        """
+        Plot target decay curves for points/areas.
+        Returns a single long-form DataFrame (target_id, version, method, ...).
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+    
+        imtU = str(imt).upper().strip()
+        versions = sorted([int(v) for v in version_list])
+    
+        df = self.uq_extract_target_series(
+            version_list=versions,
+            imt=imtU,
+            points=points,
+            areas=areas,
+            agg=agg,
+            global_stat=global_stat,
+            sigma_total_from_shakemap=sigma_total_from_shakemap,
+            sigma_aleatory=sigma_aleatory,
+            prior_version=prior_version,
+            update_radius_km=update_radius_km,
+            kernel=kernel,
+            kernel_scale_km=kernel_scale_km,
+            measurement_sigma=measurement_sigma,
+            measurement_sigma_instr=measurement_sigma_instr,
+            measurement_sigma_dyfi=measurement_sigma_dyfi,
+            dyfi_weight_mode=dyfi_weight_mode,
+            dyfi_w_max=dyfi_w_max,
+            grid_res=grid_res,
+            interp_method=interp_method,
+            interp_kwargs=interp_kwargs,
+            methods_to_compute=methods,
+            audit=audit,
+            audit_output_path=audit_output_path,
+            audit_prefix=audit_prefix,
+            dyfi_source=dyfi_source,
+        )
+    
+        targets = sorted(df["target_id"].unique().tolist())
+        for tid in targets:
+            sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
+            if sub.empty:
+                continue
+            sub = sub.sort_values(["version", "method"])
+    
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+            for m in methods:
+                s = sub[sub["method"] == m].sort_values("version")
+                if s.empty:
+                    continue
+                ax.plot(s["version"].values, s[what].values, marker="o", linewidth=1.5, label=str(m))
+    
+            ax.set_xlabel("ShakeMap version")
+            ax.set_ylabel(str(what))
+            ax.tick_params(axis="x", rotation=float(xrotation))
+            ax.grid(True, alpha=0.3)
+            ttl = title if title is not None else f"{imtU} target decay @ {tid} ({what})"
+            ax.set_title(ttl)
+            ax.legend()
+            fig.tight_layout()
+    
+            if save and (output_path is not None):
+                self._uq_save_figure_safe(
+                    fig,
+                    fname_stem=f"UQ-TargetDecay-{tid}-{imtU}-{what}",
+                    subdir="uq_plots/targets_decay",
+                    output_path=output_path,
+                    save_formats=save_formats,
+                    dpi=dpi,
+                )
+    
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)
+    
+        if plot_combined:
+            fig, ax = plt.subplots(figsize=combined_figsize, dpi=dpi)
+            for tid in targets:
+                sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
+                if sub.empty:
+                    continue
+                sub = sub.sort_values(["version", "method"])
+                for m in methods:
+                    s = sub[sub["method"] == m].sort_values("version")
+                    if s.empty:
+                        continue
+                    ax.plot(
+                        s["version"].values,
+                        s[what].values,
+                        marker="o",
+                        linewidth=1.5,
+                        label=f"{tid} · {m}",
+                    )
+    
+            ax.set_xlabel("ShakeMap version")
+            ax.set_ylabel(str(what))
+            ax.tick_params(axis="x", rotation=float(xrotation))
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f"{imtU} combined targets decay ({what})")
+            ax.legend(ncol=int(combined_legend_ncol))
+            fig.tight_layout()
+    
+            if save and (output_path is not None):
+                self._uq_save_figure_safe(
+                    fig,
+                    fname_stem=f"UQ-TargetDecay-COMBINED-{imtU}-{what}",
+                    subdir="uq_plots/targets_decay",
+                    output_path=output_path,
+                    save_formats=save_formats,
+                    dpi=dpi,
+                )
+    
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)
+    
+        return df
+    
+    
+    def smoke_uq_v26p8_cdi(
+        self,
+        *,
+        version_list,
+        imt="MMI",
+        points=None,
+        areas=None,
+        agg="mean",
+        update_radius_km=30.0,
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        dyfi_use_after_hours=None,
+        max_versions_print=6,
+    ):
+        """
+        Compact smoke test for CDI switching + per-obs sigma.
+        Prints:
+          - version → hours since origin → dyfi_source used → n_obs → n_cdi_obs
+          - meas_var stats (min/median/max)
+          - divergence stats between stationlist vs cdi for bayes_2lik and dyfi_weighted
+        """
+        import numpy as np
+        from pathlib import Path
+    
+        imtU = str(imt).upper().strip()
+        versions = sorted([int(v) for v in version_list])
+    
+        orig_hours = getattr(self, "dyfi_use_after_hours", 24.0)
+        if dyfi_use_after_hours is not None:
+            self.dyfi_use_after_hours = float(dyfi_use_after_hours)
+    
+        def _meas_var_stats(obs_list):
+            m = [o.get("meas_var") for o in (obs_list or []) if o.get("meas_var") is not None]
+            m = [float(x) for x in m if np.isfinite(x)]
+            if not m:
+                return None
+            return {"min": float(np.min(m)), "median": float(np.median(m)), "max": float(np.max(m)), "n": len(m)}
+    
+        def _collect_obs_summary(v, src):
+            obs, c = self._uq_collect_obs_for_version(
+                int(v),
+                imtU,
+                measurement_sigma=measurement_sigma,
+                include_weights=True,
+                prefer_domain=False,
+                allow_fallback=True,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                attach_per_obs_sigma=True,
+                dyfi_source=src,
+            )
+            n_cdi = sum(1 for o in (obs or []) if str(o.get("source", "")).lower() == "dyfi_cdi")
+            stats = _meas_var_stats(obs)
+            return obs, c, n_cdi, stats
+    
+        def _auto_src(v):
+            use_cdi = False
+            if hasattr(self, "_uq_is_cdi_available_for_version"):
+                try:
+                    use_cdi = bool(self._uq_is_cdi_available_for_version(int(v)))
+                except Exception:
+                    use_cdi = False
+            return "cdi" if use_cdi else "stationlist"
+    
+        try:
+            print("\n[UQ SMOKE] CDI switching diagnostics")
+            for src in ("stationlist", "auto", "cdi"):
+                print(f"\n[UQ SMOKE] dyfi_source={src}")
+                for v in versions[: int(max_versions_print)]:
+                    tae_h = self._uq_hours_since_origin(int(v)) if hasattr(self, "_uq_hours_since_origin") else None
+                    tae_str = f"{tae_h:.2f}h" if tae_h is not None else "n/a"
+                    src_eff = _auto_src(v) if src == "auto" else src
+                    obs, c, n_cdi, stats = _collect_obs_summary(v, src)
+                    print(
+                        f"  v{int(v):03d} | TaE={tae_str} | src_eff={src_eff} | "
+                        f"n_obs={int(c.get('total', 0))} | n_cdi_obs={int(n_cdi)}"
+                    )
+                    if stats:
+                        print(
+                            f"    meas_var: n={stats['n']} "
+                            f"min={stats['min']:.4f} med={stats['median']:.4f} max={stats['max']:.4f}"
+                        )
+    
+            if getattr(self, "dyfi_cdi_file", None) is None:
+                print("[UQ SMOKE] CDI file not configured (dyfi_cdi_file=None).")
+            else:
+                cdi_path = Path(str(self.dyfi_cdi_file))
+                if not cdi_path.exists():
+                    print(f"[UQ SMOKE] CDI file missing: {cdi_path}")
+                else:
+                    df_cdi = self._uq_load_dyfi_cdi_df() if hasattr(self, "_uq_load_dyfi_cdi_df") else None
+                    if df_cdi is None or len(df_cdi) == 0:
+                        print("[UQ SMOKE] CDI dataframe empty after parsing.")
+    
+            df_station = self.uq_extract_target_series(
+                version_list=versions,
+                imt=imtU,
+                points=points,
+                areas=areas,
+                agg=agg,
+                update_radius_km=update_radius_km,
+                kernel=kernel,
+                kernel_scale_km=kernel_scale_km,
+                measurement_sigma=measurement_sigma,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                methods_to_compute=("ShakeMap", "bayes_2lik", "dyfi_weighted"),
+                dyfi_source="stationlist",
+                audit=False,
+            )
+            df_cdi = self.uq_extract_target_series(
+                version_list=versions,
+                imt=imtU,
+                points=points,
+                areas=areas,
+                agg=agg,
+                update_radius_km=update_radius_km,
+                kernel=kernel,
+                kernel_scale_km=kernel_scale_km,
+                measurement_sigma=measurement_sigma,
+                measurement_sigma_instr=measurement_sigma_instr,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                methods_to_compute=("ShakeMap", "bayes_2lik", "dyfi_weighted"),
+                dyfi_source="cdi",
+                audit=False,
+            )
+    
+            def _diff_stats(method, col):
+                a = df_station[df_station["method"] == method][["version", "target_id", col]].rename(columns={col: f"{col}_a"})
+                b = df_cdi[df_cdi["method"] == method][["version", "target_id", col]].rename(columns={col: f"{col}_b"})
+                m = a.merge(b, on=["version", "target_id"], how="inner")
+                if m.empty:
+                    return None
+                d = (m[f"{col}_b"] - m[f"{col}_a"]).astype(float)
+                return {"n": int(len(d)), "min": float(np.min(d)), "median": float(np.median(d)), "max": float(np.max(d))}
+    
+            for method in ("bayes_2lik", "dyfi_weighted"):
+                for col in ("sigma_total_predicted", "mean_predicted"):
+                    stats = _diff_stats(method, col)
+                    if stats:
+                        print(
+                            f"[UQ SMOKE] diff {method} {col}: "
+                            f"n={stats['n']} min={stats['min']:.4f} med={stats['median']:.4f} max={stats['max']:.4f}"
+                        )
+                    else:
+                        print(f"[UQ SMOKE] diff {method} {col}: no overlap rows.")
+    
+            early, late = [], []
+            thr = float(getattr(self, "dyfi_use_after_hours", 24.0))
+            for v in versions:
+                tae_h = self._uq_hours_since_origin(int(v)) if hasattr(self, "_uq_hours_since_origin") else None
+                if tae_h is None:
+                    continue
+                (early if tae_h < thr else late).append(v)
+            if early and not late:
+                print("[UQ SMOKE] AUTO check: all versions earlier than threshold (auto == stationlist).")
+            elif late:
+                print(f"[UQ SMOKE] AUTO check: {len(late)} version(s) at/after threshold (auto may switch).")
+    
+        finally:
+            self.dyfi_use_after_hours = orig_hours
+    
+        return True
+    
+    
+    def _uq_parse_iso_datetime(self, s):
+        """Parse ISO/USGS timestamps safely."""
+        from datetime import datetime
+        if s is None:
+            return None
+        ss = str(s).strip()
+        if not ss:
+            return None
+        try:
+            return datetime.fromisoformat(ss.replace("Z", ""))
+        except Exception:
+            try:
+                return datetime.strptime(ss, "%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                return None
+    
+    
+    def _uq_read_grid_timestamps(self, grid_path):
+        """
+        Read per-version timestamps directly from grid.xml header.
+        Returns dict: {"process_time": dt|None, "event_time": dt|None, "TaE_hours": float|None}
+        """
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+    
+        p = Path(grid_path)
+        if not p.exists():
+            return {"process_time": None, "event_time": None, "TaE_hours": None}
+    
+        try:
+            root = ET.parse(str(p)).getroot()
+        except Exception:
+            return {"process_time": None, "event_time": None, "TaE_hours": None}
+    
+        proc_s = root.attrib.get("process_timestamp", None)
+    
+        evt_node = None
+        for ch in list(root):
+            if ch.tag.lower().endswith("event"):
+                evt_node = ch
+                break
+    
+        evt_s = None
+        if evt_node is not None:
+            evt_s = evt_node.attrib.get("event_timestamp", None)
+    
+        proc_dt = self._uq_parse_iso_datetime(proc_s)
+        evt_dt = self._uq_parse_iso_datetime(evt_s)
+    
+        if evt_dt is None and getattr(self, "event_time", None) is not None:
+            evt_dt = self.event_time
+    
+        tae_h = None
+        if (proc_dt is not None) and (evt_dt is not None):
+            try:
+                tae_h = (proc_dt - evt_dt).total_seconds() / 3600.0
+            except Exception:
+                tae_h = None
+    
+        return {"process_time": proc_dt, "event_time": evt_dt, "TaE_hours": tae_h}
+    
+    
+    def _uq_get_version_timestamp(self, version, stations_folder=None, rupture_folder=None):
+        """Return the ShakeMap process timestamp (datetime) for a given version."""
+        try:
+            grid_path, _, _, _, _ = self._uq_resolve_paths(
+                int(version),
+                stations_folder=stations_folder,
+                rupture_folder=rupture_folder,
+            )
+        except Exception:
+            return None
+        meta = self._uq_read_grid_timestamps(grid_path)
+        return meta.get("process_time", None)
+    
+    
+    def _uq_hours_since_origin(self, version, stations_folder=None, rupture_folder=None):
+        """Compute hours since event origin for a given version."""
+        try:
+            grid_path, _, _, _, _ = self._uq_resolve_paths(
+                int(version),
+                stations_folder=stations_folder,
+                rupture_folder=rupture_folder,
+            )
+        except Exception:
+            return None
+    
+        meta = self._uq_read_grid_timestamps(grid_path)
+        tae_h = meta.get("TaE_hours", None)
+        if tae_h is not None:
+            try:
+                return float(tae_h)
+            except Exception:
+                return None
+    
+        proc_dt = meta.get("process_time", None)
+        evt_dt = meta.get("event_time", None)
+        if proc_dt is None or evt_dt is None:
+            return None
+        try:
+            return float((proc_dt - evt_dt).total_seconds() / 3600.0)
+        except Exception:
+            return None
+    
+    
+    def _uq_is_cdi_available_for_version(self, version, stations_folder=None, rupture_folder=None):
+        """
+        CDI availability gate:
+          - requires dyfi_cdi_file (and it exists)
+          - requires TaE_hours >= dyfi_use_after_hours (default 24h) when dyfi_source=="auto"
+          - if dyfi_source=="cdi": always True (once file exists)
+        """
+        from pathlib import Path
+    
+        cdi_path = getattr(self, "dyfi_cdi_file", None)
+        if not cdi_path:
+            return False
+        if not Path(cdi_path).exists():
+            return False
+    
+        # If user forces CDI always
+        if str(getattr(self, "dyfi_source", "stationlist")).lower().strip() == "cdi":
+            return True
+    
+        # AUTO mode only
+        if str(getattr(self, "dyfi_source", "stationlist")).lower().strip() != "auto":
+            return False
+    
+        tae_h = self._uq_hours_since_origin(
+            int(version),
+            stations_folder=stations_folder,
+            rupture_folder=rupture_folder,
+        )
+        if tae_h is None:
+            return False
+        return bool(float(tae_h) >= float(getattr(self, "dyfi_use_after_hours", 24.0)))
+    
+    
+    def _uq_collect_dyfi_cdi_obs(
+        self,
+        imtU,
+        measurement_sigma=0.30,
+        measurement_sigma_dyfi=None,
+        attach_per_obs_sigma=True,
+        include_weights=True,
+    ):
+        """
+        Convert CDI DF into obs dicts.
+        Only meaningful for MMI / intensity space.
+        """
+        import numpy as np
+    
+        df = self._uq_load_dyfi_cdi_df()
+        if df is None or len(df) == 0:
+            return [], {"total": 0, "intensity": 0, "seismic": 0, "unknown": 0}
+    
+        if str(imtU).upper().strip() not in ("MMI", "INTENSITY"):
+            return [], {"total": 0, "intensity": 0, "seismic": 0, "unknown": 0}
+    
+        max_dist = float(getattr(self, "dyfi_cdi_max_dist_km", 400.0))
+        min_nresp = int(getattr(self, "dyfi_cdi_min_nresp", 1))
+    
+        obs = []
+        for _, r in df.iterrows():
+            lat = r.get("lat", np.nan)
+            lon = r.get("lon", np.nan)
+            val = r.get("cdi", np.nan)
+            dist = r.get("dist_km", np.nan)
+            nresp = r.get("nresp", np.nan)
+            std = r.get("std", np.nan)
+            suspect = r.get("suspect", np.nan)
+    
+            if not (np.isfinite(lat) and np.isfinite(lon) and np.isfinite(val)):
+                continue
+    
+            if np.isfinite(suspect) and int(suspect) != 0:
+                continue
+    
+            if np.isfinite(dist) and dist > max_dist:
+                continue
+    
+            if np.isfinite(nresp) and int(nresp) < min_nresp:
+                continue
+    
+            sigma_obs = None
+            if np.isfinite(std) and float(std) > 0:
+                sigma_obs = float(std)
+            elif measurement_sigma_dyfi is not None:
+                sigma_obs = float(measurement_sigma_dyfi)
+            else:
+                sigma_obs = float(measurement_sigma)
+    
+            o = {
+                "lat": float(lat),
+                "lon": float(lon),
+                "value": float(val),
+                "domain": "intensity",
+                "source": "dyfi_cdi",
+                "type": "dyfi_cdi",
+            }
+    
+            if include_weights and hasattr(self, "_uq_dyfi_weight_from_row"):
+                try:
+                    o["w"] = float(self._uq_dyfi_weight_from_row(nresp))
+                except Exception:
+                    o["w"] = 1.0
+            elif include_weights:
+                o["w"] = 1.0
+    
+            if attach_per_obs_sigma:
+                o["sigma_obs"] = float(sigma_obs)
+                o["meas_var"] = float(max(1e-12, float(sigma_obs) ** 2))
+    
+            if np.isfinite(nresp):
+                o["nresp"] = float(nresp)
+            if np.isfinite(std):
+                o["stddev"] = float(std)
+            if np.isfinite(dist):
+                o["distance_km"] = float(dist)
+            if np.isfinite(suspect):
+                o["suspect"] = float(suspect)
+    
+            obs.append(o)
+    
+        counts = {"total": len(obs), "intensity": len(obs), "seismic": 0, "unknown": 0}
+        return obs, counts
+    
+    
+    def _uq_collect_obs_for_version(
+        self,
+        version,
+        imtU,
+        measurement_sigma=0.30,
+        include_weights=True,
+        prefer_domain=True,
+        allow_fallback=True,
+        # Step-4 kwargs
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        attach_per_obs_sigma=False,
+        # NEW: DYFI source selection
+        dyfi_source=None,  # None -> use self.dyfi_source ; "stationlist"|"cdi"|"auto"
+    ):
+        """
+        Override wrapper with CDI switching + per-observation sigma preference.
+        - If dyfi_source resolves to "stationlist": use existing stationlist-based collector.
+        - If dyfi_source resolves to "cdi": use CDI obs for intensity domain (MMI only).
+        - If "auto": use stationlist early; CDI after dyfi_use_after_hours.
+        """
+        import numpy as np
+    
+        # resolve desired dyfi source
+        src = dyfi_source
+        if src is None:
+            src = getattr(self, "dyfi_source", "stationlist")
+        src = str(src).lower().strip()
+    
+        # decide if CDI should be used
+        use_cdi = False
+        if src == "cdi":
+            use_cdi = True
+        elif src == "auto":
+            if hasattr(self, "_uq_is_cdi_available_for_version"):
+                try:
+                    use_cdi = bool(self._uq_is_cdi_available_for_version(int(version)))
+                except Exception:
+                    use_cdi = False
+    
+        domain_pref = self._uq_infer_obs_domain(imtU)
+    
+        # If CDI is selected, build CDI obs (intensity-only, MMI-only)
+        if use_cdi and str(imtU).upper().strip() in ("MMI", "INTENSITY"):
+            obs_cdi, c_cdi = self._uq_collect_dyfi_cdi_obs(
+                imtU=str(imtU).upper().strip(),
+                measurement_sigma=float(measurement_sigma),
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                attach_per_obs_sigma=bool(attach_per_obs_sigma),
+                include_weights=bool(include_weights),
+            )
+            # prefer_domain filtering consistent with existing behavior
+            if prefer_domain:
+                obs_pref = [o for o in (obs_cdi or []) if o.get("domain") == domain_pref]
+                if obs_pref:
+                    c = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+                    for o in obs_pref:
+                        c["total"] += 1
+                        d = o.get("domain", "unknown")
+                        if d in c:
+                            c[d] += 1
+                        else:
+                            c["unknown"] += 1
+                    return obs_pref, c
+                if not allow_fallback:
+                    return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+            return obs_cdi, c_cdi
+    
+        # --- fall back to your existing stationlist-based collector ---
+        if not hasattr(self, "_uq_collect_observations"):
+            return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+    
+        raw = self._uq_collect_observations(int(version), imtU)
+        if raw is None:
+            raw = []
+    
+        obs_all = []
+        counts_all = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+    
+        def _classify_domain(o):
+            t = str(o.get("type", "")).lower().strip()
+            if ("dyfi" in t) or ("intensity" in t) or ("macro" in t):
+                return "intensity"
+            if ("instrument" in t) or ("seismic" in t) or ("station" in t):
+                return "seismic"
+            return domain_pref if domain_pref in ("seismic", "intensity") else "unknown"
+    
+        def _pick_sigma(domain, row):
+            # Prefer per-observation sigma if present in stationlist payload
+            if domain == "intensity" and row.get("intensity_stddev", None) is not None:
+                try:
+                    so = float(row.get("intensity_stddev"))
+                    if np.isfinite(so) and so > 0:
+                        return float(so)
+                except Exception:
+                    pass
+            if row.get("sigma_obs", None) is not None:
+                try:
+                    so = float(row.get("sigma_obs"))
+                    if np.isfinite(so) and so > 0:
+                        return float(so)
+                except Exception:
+                    pass
+            # domain-level likelihood sigma
+            if domain == "seismic" and measurement_sigma_instr is not None:
+                return float(measurement_sigma_instr)
+            if domain == "intensity" and measurement_sigma_dyfi is not None:
+                return float(measurement_sigma_dyfi)
+            return float(measurement_sigma)
+    
+        for o in raw:
+            try:
+                lat = float(o["lat"])
+                lon = float(o["lon"])
+            except Exception:
+                continue
+    
+            val = o.get("value", None)
+            if val is None:
+                continue
+            try:
+                val = float(val)
+            except Exception:
+                continue
+            if not np.isfinite(val):
+                continue
+    
+            domain = _classify_domain(o)
+            w = float(o.get("w", 1.0)) if include_weights else 1.0
+    
+            rec = {
+                "lat": lat,
+                "lon": lon,
+                "value": val,
+                "w": w,
+                "domain": domain,
+                "type": o.get("type", None),
+                "unit": o.get("unit", None),
+                "source": o.get("source", "stationlist"),
+            }
+    
+            if attach_per_obs_sigma:
+                sig = _pick_sigma(domain, o)
+                rec["sigma_obs"] = float(sig)
+                rec["meas_var"] = float(sig) ** 2
+    
+            obs_all.append(rec)
+            counts_all["total"] += 1
+            if domain in counts_all:
+                counts_all[domain] += 1
+            else:
+                counts_all["unknown"] += 1
+    
+        # prefer_domain behavior
+        if prefer_domain:
+            obs_pref = [o for o in obs_all if o.get("domain") == domain_pref]
+            if len(obs_pref) > 0:
+                c = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+                for o in obs_pref:
+                    c["total"] += 1
+                    d = o.get("domain", "unknown")
+                    if d in c:
+                        c[d] += 1
+                    else:
+                        c["unknown"] += 1
+                return obs_pref, c
+    
+            if not allow_fallback:
+                return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+    
+        return obs_all, counts_all
+
+
+
+
+
+    # ==========================================================
+    # PATCH v26.8b — CDI routing + mixed MMI obs (DYFI + seismic-intensity)
+    # Paste at END of SHAKEuq class (last definition wins).
+    # ==========================================================
+    
+    def _uq_parse_iso_datetime(self, s):
+        from datetime import datetime
+        if s is None:
+            return None
+        ss = str(s).strip()
+        if not ss:
+            return None
+        try:
+            return datetime.fromisoformat(ss.replace("Z", ""))
+        except Exception:
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(ss.replace("Z", ""), fmt)
+                except Exception:
+                    pass
+        return None
+    
+    
+    def _uq_read_grid_timestamps(self, grid_path):
+        """
+        Read per-version timestamps from grid.xml header.
+        Returns dict: {"process_time": dt|None, "event_time": dt|None, "TaE_hours": float|None}
+        """
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+    
+        p = Path(grid_path)
+        if not p.exists():
+            return {"process_time": None, "event_time": None, "TaE_hours": None}
+    
+        try:
+            root = ET.parse(str(p)).getroot()
+        except Exception:
+            return {"process_time": None, "event_time": None, "TaE_hours": None}
+    
+        proc_s = root.attrib.get("process_timestamp", None)
+    
+        evt_node = None
+        for ch in list(root):
+            if str(ch.tag).lower().endswith("event"):
+                evt_node = ch
+                break
+        evt_s = evt_node.attrib.get("event_timestamp", None) if evt_node is not None else None
+    
+        proc_dt = self._uq_parse_iso_datetime(proc_s)
+        evt_dt = self._uq_parse_iso_datetime(evt_s)
+    
+        # fallback to object-level event_time (if set)
+        if evt_dt is None and getattr(self, "event_time", None) is not None:
+            evt_dt = self.event_time
+    
+        tae_h = None
+        if proc_dt is not None and evt_dt is not None:
+            try:
+                tae_h = (proc_dt - evt_dt).total_seconds() / 3600.0
+            except Exception:
+                tae_h = None
+    
+        return {"process_time": proc_dt, "event_time": evt_dt, "TaE_hours": tae_h}
+    
+    
+    def _uq_get_version_timestamp(self, version, stations_folder=None, rupture_folder=None):
+        """Return ShakeMap process timestamp (datetime) for a version."""
+        try:
+            grid_path, _, _, _, _ = self._uq_resolve_paths(
+                int(version),
+                stations_folder=stations_folder,
+                rupture_folder=rupture_folder,
+            )
+        except Exception:
+            return None
+        meta = self._uq_read_grid_timestamps(grid_path)
+        return meta.get("process_time", None)
+    
+    
+    def _uq_hours_since_origin(self, version, stations_folder=None, rupture_folder=None):
+        """Compute hours since origin for a version (TaE_hours)."""
+        try:
+            grid_path, _, _, _, _ = self._uq_resolve_paths(
+                int(version),
+                stations_folder=stations_folder,
+                rupture_folder=rupture_folder,
+            )
+        except Exception:
+            return None
+    
+        meta = self._uq_read_grid_timestamps(grid_path)
+        tae_h = meta.get("TaE_hours", None)
+        if tae_h is not None:
+            try:
+                return float(tae_h)
+            except Exception:
+                return None
+    
+        proc_dt = meta.get("process_time", None)
+        evt_dt = meta.get("event_time", None)
+        if proc_dt is None or evt_dt is None:
+            return None
+        try:
+            return float((proc_dt - evt_dt).total_seconds() / 3600.0)
+        except Exception:
+            return None
+    
+    
+    def _uq_is_cdi_available_for_version(self, version, stations_folder=None, rupture_folder=None):
+        """
+        CDI gate:
+          - requires dyfi_cdi_file exists
+          - if self.dyfi_source == "cdi": True (force)
+          - if self.dyfi_source == "auto": True only if TaE_hours >= dyfi_use_after_hours (default 24h)
+          - otherwise False
+        """
+        from pathlib import Path
+    
+        cdi_path = getattr(self, "dyfi_cdi_file", None)
+        if not cdi_path:
+            return False
+        if not Path(str(cdi_path)).exists():
+            return False
+    
+        mode = str(getattr(self, "dyfi_source", "stationlist")).lower().strip()
+        if mode == "cdi":
+            return True
+        if mode != "auto":
+            return False
+    
+        tae_h = self._uq_hours_since_origin(int(version), stations_folder=stations_folder, rupture_folder=rupture_folder)
+        if tae_h is None:
+            return False
+        return bool(float(tae_h) >= float(getattr(self, "dyfi_use_after_hours", 24.0)))
+    
+    
+    def _uq_load_dyfi_cdi_df(self):
+        """
+        Load CDI dataframe ONCE and cache it.
+        Expects USGSParser(parser_type="dyfi_data", file_path=...).
+        Produces columns: lat, lon, cdi, nresp, dist_km, std, suspect
+        """
+        from pathlib import Path
+        import pandas as pd
+    
+        if getattr(self, "_dyfi_cdi_df_cache", None) is not None:
+            return self._dyfi_cdi_df_cache
+    
+        f = getattr(self, "dyfi_cdi_file", None)
+        if not f:
+            self._dyfi_cdi_df_cache = None
+            return None
+    
+        p = Path(str(f))
+        if not p.exists():
+            self._dyfi_cdi_df_cache = None
+            return None
+    
+        try:
+            from modules.SHAKEparser import USGSParser
+            parser = USGSParser(parser_type="dyfi_data", file_path=str(p))
+            df = parser.get_dataframe()
+        except Exception:
+            self._dyfi_cdi_df_cache = None
+            return None
+    
+        if df is None or len(df) == 0:
+            self._dyfi_cdi_df_cache = None
+            return None
+    
+        # normalize likely column names to our internal ones
+        colmap = {}
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            if cl in ("latitude", "lat"):
+                colmap[c] = "lat"
+            elif cl in ("longitude", "lon"):
+                colmap[c] = "lon"
+            elif cl in ("cdi",):
+                colmap[c] = "cdi"
+            elif "no. of responses" in cl or cl in ("nresp", "responses"):
+                colmap[c] = "nresp"
+            elif "hypocentral distance" in cl or cl in ("distance", "dist", "dist_km"):
+                colmap[c] = "dist_km"
+            elif "standard deviation" in cl or cl in ("std", "stddev", "sigma"):
+                colmap[c] = "std"
+            elif "suspect" in cl:
+                colmap[c] = "suspect"
+        df = df.rename(columns=colmap)
+    
+        need = ["lat", "lon", "cdi"]
+        for k in need:
+            if k not in df.columns:
+                self._dyfi_cdi_df_cache = None
+                return None
+    
+        # coerce numerics
+        for k in ("lat", "lon", "cdi", "nresp", "dist_km", "std", "suspect"):
+            if k in df.columns:
+                df[k] = pd.to_numeric(df[k], errors="coerce")
+    
+        df = df.dropna(subset=["lat", "lon", "cdi"]).copy()
+        self._dyfi_cdi_df_cache = df
+        return df
+    
+    
+    def _uq_dyfi_weight_from_row(self, nresp):
+        """
+        First-step DYFI weighting rule (simple + stable):
+          - rule="nresp_threshold" (default): weight=high if nresp>=thr else low
+          - rule="sqrt_nresp": weight=sqrt(nresp) capped by dyfi_weight_max
+          - rule="none": weight=1
+        """
+        import numpy as np
+    
+        rule = str(getattr(self, "dyfi_weight_rule", "nresp_threshold")).lower().strip()
+        thr = int(getattr(self, "dyfi_weight_threshold", 3))
+        wlo = float(getattr(self, "dyfi_weight_low", 1.0))
+        whi = float(getattr(self, "dyfi_weight_high", 2.0))
+        wmax = float(getattr(self, "dyfi_weight_max", 10.0))
+    
+        if nresp is None or (not np.isfinite(nresp)):
+            return float(wlo)
+    
+        n = int(max(0, float(nresp)))
+    
+        if rule == "none":
+            return 1.0
+        if rule == "sqrt_nresp":
+            return float(min(wmax, np.sqrt(max(1, n))))
+        return float(whi if n >= thr else wlo)
+    
+    
+    def _uq_collect_dyfi_cdi_obs(
+        self,
+        imtU,
+        measurement_sigma=0.30,
+        measurement_sigma_dyfi=None,
+        attach_per_obs_sigma=True,
+        include_weights=True,
+    ):
+        """
+        Build obs list from CDI file (MMI only).
+        """
+        import numpy as np
+    
+        df = self._uq_load_dyfi_cdi_df()
+        if df is None or len(df) == 0:
+            return [], {"total": 0, "intensity": 0, "seismic": 0, "unknown": 0}
+    
+        if str(imtU).upper().strip() not in ("MMI", "INTENSITY"):
+            return [], {"total": 0, "intensity": 0, "seismic": 0, "unknown": 0}
+    
+        max_dist = float(getattr(self, "dyfi_cdi_max_dist_km", 400.0))
+        min_nresp = int(getattr(self, "dyfi_cdi_min_nresp", 1))
+    
+        obs = []
+        for _, r in df.iterrows():
+            lat = r.get("lat", np.nan)
+            lon = r.get("lon", np.nan)
+            cdi = r.get("cdi", np.nan)
+            nresp = r.get("nresp", np.nan)
+            dist = r.get("dist_km", np.nan)
+            std = r.get("std", np.nan)
+            suspect = r.get("suspect", np.nan)
+    
+            if not (np.isfinite(lat) and np.isfinite(lon) and np.isfinite(cdi)):
+                continue
+            if np.isfinite(suspect) and int(suspect) != 0:
+                continue
+            if np.isfinite(dist) and float(dist) > max_dist:
+                continue
+            if np.isfinite(nresp) and int(nresp) < min_nresp:
+                continue
+    
+            # sigma: prefer CDI std; then dyfi scalar; then base
+            if np.isfinite(std) and float(std) > 0:
+                sigma_obs = float(std)
+            elif measurement_sigma_dyfi is not None:
+                sigma_obs = float(measurement_sigma_dyfi)
+            else:
+                sigma_obs = float(measurement_sigma)
+    
+            o = {
+                "lat": float(lat),
+                "lon": float(lon),
+                "value": float(cdi),
+                "domain": "intensity",
+                "source": "dyfi_cdi",
+                "type": "dyfi_cdi",
+            }
+            if include_weights:
+                o["w"] = float(self._uq_dyfi_weight_from_row(nresp))
+            if attach_per_obs_sigma:
+                o["sigma_obs"] = float(sigma_obs)
+                o["meas_var"] = float(max(1e-12, sigma_obs ** 2))
+    
+            # keep helpful metadata
+            if np.isfinite(nresp):
+                o["nresp"] = float(nresp)
+            if np.isfinite(dist):
+                o["distance_km"] = float(dist)
+            if np.isfinite(std):
+                o["stddev"] = float(std)
+            if np.isfinite(suspect):
+                o["suspect"] = float(suspect)
+    
+            obs.append(o)
+    
+        return obs, {"total": len(obs), "intensity": len(obs), "seismic": 0, "unknown": 0}
+    
+    
+    def _uq_debug_obs_signature(self, obs_list, label="obs"):
+        """Small debug print: domains + meas_var presence."""
+        import numpy as np
+        if obs_list is None:
+            obs_list = []
+        n = len(obs_list)
+        dom = {"seismic": 0, "intensity": 0, "unknown": 0}
+        mv = []
+        for o in obs_list:
+            d = str(o.get("domain", "unknown")).lower().strip()
+            dom[d] = dom.get(d, 0) + 1
+            if o.get("meas_var", None) is not None:
+                try:
+                    mv.append(float(o["meas_var"]))
+                except Exception:
+                    pass
+        mv = np.asarray(mv, float) if mv else np.asarray([], float)
+        if mv.size:
+            mv = mv[np.isfinite(mv)]
+        msg = f"[UQ DEBUG] {label}: n={n} dom={dom}"
+        if mv.size:
+            msg += f" meas_var(n={mv.size} min={float(np.min(mv)):.4g} med={float(np.median(mv)):.4g} max={float(np.max(mv)):.4g})"
+        else:
+            msg += " meas_var(n=0)"
+        print(msg)
+    
+    
+    def _uq_collect_observations(self, version: int, imt: str):
+        """
+        IMPORTANT PATCH:
+        - For MMI: return BOTH
+            (a) stationlist DYFI intensity points
+            (b) stationlist instrumented intensity (seismic) points, if present
+          This fixes: MMI had only DYFI → bayes_2lik looked identical to bayes.
+        - For PGA/PGV: return instrumented points (as before).
+        """
+        import numpy as np
+    
+        if not hasattr(self, "uq_state") or self.uq_state is None:
+            raise RuntimeError("UQ dataset not built yet.")
+    
+        v = int(version)
+        raw = self.uq_state["versions_raw"].get(v, None)
+        if raw is None:
+            return []
+    
+        imt_u = str(imt).upper().strip()
+        obs = []
+    
+        stations = raw.get("stations", {})
+        dyfi = stations.get("dyfi", []) or []
+        inst = stations.get("instrumented", []) or []
+    
+        if imt_u == "MMI":
+            # (a) DYFI from stationlist
+            for o in dyfi:
+                val = o.get("intensity", None)
+                try:
+                    val = float(val)
+                except Exception:
+                    continue
+                if not np.isfinite(val):
+                    continue
+                rec = {
+                    "lat": float(o["lat"]),
+                    "lon": float(o["lon"]),
+                    "value": float(val),
+                    "w": float(o.get("w", 1.0)),
+                    "type": "DYFI",
+                    "unit": "MMI",
+                    "source": "stationlist",
+                }
+                # keep per-observation sigma if it exists
+                if o.get("intensity_stddev", None) is not None:
+                    rec["intensity_stddev"] = o.get("intensity_stddev", None)
+                if o.get("nresp", None) is not None:
+                    rec["nresp"] = o.get("nresp", None)
+                obs.append(rec)
+    
+            # (b) instrumented intensity (seismic) from stationlist (if present)
+            for o in inst:
+                val = o.get("intensity", None)
+                if val is None:
+                    continue
+                try:
+                    val = float(val)
+                except Exception:
+                    continue
+                if not np.isfinite(val):
+                    continue
+                rec = {
+                    "lat": float(o["lat"]),
+                    "lon": float(o["lon"]),
+                    "value": float(val),
+                    "w": float(o.get("w", 1.0)),
+                    "type": "seismic_intensity",
+                    "unit": "MMI",
+                    "source": "stationlist",
+                }
+                if o.get("intensity_stddev", None) is not None:
+                    rec["intensity_stddev"] = o.get("intensity_stddev", None)
+                obs.append(rec)
+    
+            return obs
+    
+        if imt_u == "PGA":
+            for o in inst:
+                val = o.get("pga", None)
+                try:
+                    val = float(val)
+                except Exception:
+                    continue
+                if not np.isfinite(val):
+                    continue
+                rec = {
+                    "lat": float(o["lat"]),
+                    "lon": float(o["lon"]),
+                    "value": float(val),
+                    "w": float(o.get("w", 1.0)),
+                    "type": "instrumented",
+                    "unit": o.get("pga_unit", "%g"),
+                    "source": "stationlist",
+                }
+                obs.append(rec)
+            return obs
+    
+        if imt_u == "PGV":
+            for o in inst:
+                val = o.get("pgv", None)
+                try:
+                    val = float(val)
+                except Exception:
+                    continue
+                if not np.isfinite(val):
+                    continue
+                rec = {
+                    "lat": float(o["lat"]),
+                    "lon": float(o["lon"]),
+                    "value": float(val),
+                    "w": float(o.get("w", 1.0)),
+                    "type": "instrumented",
+                    "unit": o.get("pgv_unit", "cm/s"),
+                    "source": "stationlist",
+                }
+                obs.append(rec)
+            return obs
+    
+        return []
+    
+    
+    def _uq_collect_obs_for_version(
+        self,
+        version,
+        imtU,
+        measurement_sigma=0.30,
+        include_weights=True,
+        prefer_domain=True,
+        allow_fallback=True,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        attach_per_obs_sigma=False,
+        dyfi_source=None,  # None -> use self.dyfi_source ; "stationlist"|"cdi"|"auto"
+    ):
+        """
+        Unified obs collector with DYFI source switching.
+          - stationlist: use _uq_collect_observations (now includes MMI DYFI + seismic_intensity)
+          - cdi: for MMI, use CDI obs only; for other IMTs fall back to stationlist
+          - auto: stationlist early; CDI after dyfi_use_after_hours
+        Produces obs dicts in WORKING-SPACE-ready shape downstream:
+          {lat, lon, value, w, domain, type, source, sigma_obs?, meas_var?}
+        """
+        import numpy as np
+    
+        imtU = str(imtU).upper().strip()
+        mode = dyfi_source
+        if mode is None:
+            mode = getattr(self, "dyfi_source", "stationlist")
+        mode = str(mode).lower().strip()
+    
+        # auto switch
+        if mode == "auto":
+            if self._uq_is_cdi_available_for_version(int(version), stations_folder=getattr(self, "stations_folder", None), rupture_folder=getattr(self, "rupture_folder", None)):
+                mode_eff = "cdi"
+            else:
+                mode_eff = "stationlist"
+        else:
+            mode_eff = mode
+    
+        # infer preferred domain by IMT
+        domain_pref = self._uq_infer_obs_domain(imtU) if hasattr(self, "_uq_infer_obs_domain") else ("intensity" if imtU == "MMI" else "seismic")
+    
+        # CDI branch (MMI only)
+        if mode_eff == "cdi":
+            obs_cdi, cdi_counts = self._uq_collect_dyfi_cdi_obs(
+                imtU,
+                measurement_sigma=measurement_sigma,
+                measurement_sigma_dyfi=measurement_sigma_dyfi,
+                attach_per_obs_sigma=attach_per_obs_sigma,
+                include_weights=include_weights,
+            )
+            # apply prefer_domain filter (CDI is intensity by definition)
+            if prefer_domain and domain_pref == "seismic":
+                if not allow_fallback:
+                    return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+            return obs_cdi, cdi_counts
+    
+        # stationlist branch
+        raw = self._uq_collect_observations(int(version), imtU)
+        if raw is None:
+            raw = []
+    
+        def _classify_domain(o):
+            t = str(o.get("type", "")).lower().strip()
+            if ("dyfi" in t) or ("macro" in t) or ("intensity" in t):
+                return "intensity"
+            if ("instrument" in t) or ("seismic" in t) or ("station" in t):
+                return "seismic"
+            return domain_pref if domain_pref in ("seismic", "intensity") else "unknown"
+    
+        def _pick_sigma(domain, row):
+            # prefer explicit per-observation sigma from stationlist payload
+            if domain == "intensity" and row.get("intensity_stddev", None) is not None:
+                try:
+                    so = float(row.get("intensity_stddev"))
+                    if np.isfinite(so) and so > 0:
+                        return float(so)
+                except Exception:
+                    pass
+            if row.get("sigma_obs", None) is not None:
+                try:
+                    so = float(row.get("sigma_obs"))
+                    if np.isfinite(so) and so > 0:
+                        return float(so)
+                except Exception:
+                    pass
+            # domain-level two-likelihood
+            if domain == "seismic" and measurement_sigma_instr is not None:
+                return float(measurement_sigma_instr)
+            if domain == "intensity" and measurement_sigma_dyfi is not None:
+                return float(measurement_sigma_dyfi)
+            return float(measurement_sigma)
+    
+        obs_all = []
+        counts = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+    
+        for o in raw:
+            try:
+                lat = float(o["lat"])
+                lon = float(o["lon"])
+                val = float(o["value"])
+            except Exception:
+                continue
+            if not (np.isfinite(lat) and np.isfinite(lon) and np.isfinite(val)):
+                continue
+    
+            dom = _classify_domain(o)
+            w = float(o.get("w", 1.0)) if include_weights else 1.0
+    
+            rec = {
+                "lat": lat,
+                "lon": lon,
+                "value": val,
+                "w": w,
+                "domain": dom,
+                "type": o.get("type", None),
+                "unit": o.get("unit", None),
+                "source": o.get("source", "stationlist"),
+            }
+    
+            if attach_per_obs_sigma:
+                sig = _pick_sigma(dom, o)
+                rec["sigma_obs"] = float(sig)
+                rec["meas_var"] = float(sig) ** 2
+    
+            obs_all.append(rec)
+            counts["total"] += 1
+            if dom in counts:
+                counts[dom] += 1
+            else:
+                counts["unknown"] += 1
+    
+        if prefer_domain:
+            obs_pref = [oo for oo in obs_all if oo.get("domain") == domain_pref]
+            if len(obs_pref) > 0:
+                c = {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+                for oo in obs_pref:
+                    c["total"] += 1
+                    d = oo.get("domain", "unknown")
+                    c[d] = c.get(d, 0) + 1
+                return obs_pref, c
+    
+            if not allow_fallback:
+                return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
+    
+        return obs_all, counts
+    
+    
+    def uq_extract_target_series(
+        self,
+        version_list,
+        imt="MMI",
+        points=None,
+        areas=None,
+        agg="mean",
+        global_stat=None,
+        sigma_total_from_shakemap=True,
+        sigma_aleatory=None,
+        prior_version=None,
+        update_radius_km=30.0,
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        # dyfi weighting method
+        dyfi_weight_mode="sqrt_nresp",
+        dyfi_w_max=10.0,
+        # unified grid controls
+        grid_res=None,
+        interp_method="nearest",
+        interp_kwargs=None,
+        # Option B safety
+        methods_to_compute=None,
+        # audit
+        audit=True,
+        audit_output_path=None,
+        audit_prefix=None,
+        # NEW: route DYFI source downstream
+        dyfi_source=None,
+    ):
+        """
+        Target series extraction:
+          - ShakeMap: mean & sigma_total from file-derived unified grid
+          - bayes: v0 prior + prefer_domain=True obs
+          - bayes_2lik: v0 prior + prefer_domain=False obs + meas_var if present
+          - dyfi_weighted: bayes_2lik + DYFI weights (nresp-based) on intensity points
+          - dyfi_source: stationlist | cdi | auto
+        """
+        import numpy as np
+        import pandas as pd
+    
+        def _norm_method(m):
+            s = str(m).strip()
+            return "ShakeMap" if s.lower() == "published" else s
+    
+        if methods_to_compute is None:
+            compute = {"ShakeMap", "bayes", "bayes_2lik", "dyfi_weighted"}
+        else:
+            compute = {_norm_method(m) for m in methods_to_compute}
+            compute.add("ShakeMap")
+    
+        imtU = str(imt).upper().strip()
+        versions = sorted([int(v) for v in version_list])
+    
+        # targets
+        if global_stat is not None:
+            gs = str(global_stat).lower().strip()
+            gid = f"GLOBAL_{gs.replace(' ', '_')}".replace("__", "_")
+            targets = [{"id": gid, "type": "global"}]
+        else:
+            targets = self._uq_parse_targets(points=points, areas=areas)
+    
+        # unified grid
+        _, lat2d, lon2d = self._uq_get_unified_for_versions(
+            versions, imt=imtU, grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
+        )
+    
+        v0 = int(prior_version) if prior_version is not None else int(versions[0])
+    
+        # prior fields
+        mu0_lin, sig0_raw = self._uq_get_mu_sigma_unified(
+            v0, imtU, lat2d, lon2d, grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
+        )
+        mu0_ws = self._uq_mu_to_ws(imtU, mu0_lin)
+    
+        _sig_tot0, s_a0, s_ep0 = self._uq_decompose_sigma_safe(
+            imtU, sig0_raw, sigma_aleatory=sigma_aleatory, sigma_total_from_shakemap=sigma_total_from_shakemap
+        )
+    
+        def _apply_dyfi_weights(obs_mix):
+            # keep stable: only adjust "w" for intensity obs; seismic obs unchanged.
+            if not obs_mix:
+                return obs_mix
+            out = []
+            for o in obs_mix:
+                oo = dict(o)
+                if str(oo.get("domain", "")).lower().strip() == "intensity":
+                    # prefer nresp if present; else keep existing weight
+                    nresp = oo.get("nresp", None)
+                    if nresp is None and "meta" in oo and isinstance(oo["meta"], dict):
+                        nresp = oo["meta"].get("nresp", None)
+                    try:
+                        wfac = float(self._uq_dyfi_weight_from_row(nresp))
+                    except Exception:
+                        wfac = 1.0
+                    try:
+                        oo["w"] = float(oo.get("w", 1.0)) * float(wfac)
+                    except Exception:
+                        oo["w"] = float(wfac)
+                out.append(oo)
+            return out
+    
+        rows = []
+        agg_effective = str(agg).lower().strip()
+    
+        for t in targets:
+            if t.get("type") == "global":
+                mask = np.isfinite(lat2d)
+                ttype = "global"
+            else:
+                mask, _meta = self._uq_target_mask(t, lat2d, lon2d)
+                ttype = t.get("type", "target")
+    
+            n_cells = int(np.sum(mask)) if mask is not None else 0
+            if (mask is None) or (n_cells <= 0):
+                continue
+    
+            # v0 scalars
+            mu0_lin_t = self._uq_agg(mu0_lin[mask], agg=agg_effective)
+            sig0_raw_t = self._uq_agg(sig0_raw[mask], agg=agg_effective)
+            s_a0_t = self._uq_agg(s_a0[mask], agg=agg_effective)
+            s_ep0_t = self._uq_agg(s_ep0[mask], agg=agg_effective)
+    
+            for v in versions:
+                mu_v_lin, sig_v_raw = self._uq_get_mu_sigma_unified(
+                    int(v), imtU, lat2d, lon2d, grid_res=grid_res, interp_method=interp_method, interp_kwargs=interp_kwargs
+                )
+                mean_pub = self._uq_agg(mu_v_lin[mask], agg=agg_effective)
+                sig_pub = self._uq_agg(sig_v_raw[mask], agg=agg_effective)
+    
+                # published
+                rows.append({
+                    "target_id": t.get("id", "GLOBAL"),
+                    "target_type": ttype,
+                    "version": int(v),
+                    "imt": imtU,
+                    "method": "ShakeMap",
+                    "mean_predicted": float(mean_pub),
+                    "sigma_total_predicted": float(sig_pub),
+                    "sigma_epistemic_predicted": np.nan,
+                    "sigma_aleatoric_used": np.nan,
+                    "n_obs_total": 0,
+                    "n_obs_seismic": 0,
+                    "n_obs_intensity": 0,
+                    "n_obs_unknown": 0,
+                    "n_cells": int(n_cells),
+                })
+    
+                # obs streams (forward dyfi_source)
+                obs_pref, c_pref = self._uq_collect_obs_for_version(
+                    int(v), imtU,
+                    measurement_sigma=measurement_sigma,
+                    include_weights=True,
+                    prefer_domain=True,
+                    allow_fallback=True,
+                    measurement_sigma_instr=measurement_sigma_instr,
+                    measurement_sigma_dyfi=measurement_sigma_dyfi,
+                    attach_per_obs_sigma=True,
+                    dyfi_source=dyfi_source,
+                )
+                obs_mix, c_mix = self._uq_collect_obs_for_version(
+                    int(v), imtU,
+                    measurement_sigma=measurement_sigma,
+                    include_weights=True,
+                    prefer_domain=False,
+                    allow_fallback=True,
+                    measurement_sigma_instr=measurement_sigma_instr,
+                    measurement_sigma_dyfi=measurement_sigma_dyfi,
+                    attach_per_obs_sigma=True,
+                    dyfi_source=dyfi_source,
+                )
+    
+                if getattr(self, "debug_uq", False) or getattr(self, "uq_debug", False):
+                    self._uq_debug_obs_signature(obs_pref, label=f"bayes v{int(v):03d} dyfi_source={dyfi_source or getattr(self,'dyfi_source','stationlist')}")
+                    self._uq_debug_obs_signature(obs_mix,  label=f"bayes_2lik v{int(v):03d} dyfi_source={dyfi_source or getattr(self,'dyfi_source','stationlist')}")
+    
+                # bayes (domain-preferred)
+                if "bayes" in compute:
+                    if c_pref.get("total", 0) == 0:
+                        mean_b, sig_b, s_ep_b_t = mu0_lin_t, sig0_raw_t, s_ep0_t
+                    else:
+                        mu_b_ws, s_ep_b = self._uq_bayes_local_posterior_at_mask(
+                            mu0_ws, s_ep0, s_a0,
+                            lat2d, lon2d, mask, [o.copy() for o in obs_pref],
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,  # fallback only
+                        )
+                        mu_b_lin = self._uq_mu_from_ws(imtU, mu_b_ws)
+                        mean_b = self._uq_agg(mu_b_lin[mask], agg=agg_effective)
+                        s_ep_b_t = self._uq_agg(s_ep_b[mask], agg=agg_effective)
+                        sig_b = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep_b_t) ** 2)))
+    
+                    rows.append({
+                        "target_id": t.get("id", "GLOBAL"),
+                        "target_type": ttype,
+                        "version": int(v),
+                        "imt": imtU,
+                        "method": "bayes",
+                        "mean_predicted": float(mean_b),
+                        "sigma_total_predicted": float(sig_b),
+                        "sigma_epistemic_predicted": float(s_ep_b_t),
+                        "sigma_aleatoric_used": float(s_a0_t),
+                        "n_obs_total": int(c_pref.get("total", 0)),
+                        "n_obs_seismic": int(c_pref.get("seismic", 0)),
+                        "n_obs_intensity": int(c_pref.get("intensity", 0)),
+                        "n_obs_unknown": int(c_pref.get("unknown", 0)),
+                        "n_cells": int(n_cells),
+                    })
+    
+                # bayes_2lik (mixed + meas_var)
+                if "bayes_2lik" in compute:
+                    if c_mix.get("total", 0) == 0:
+                        mean2, sig2, s_ep2_t = mu0_lin_t, sig0_raw_t, s_ep0_t
+                    else:
+                        mu2_ws, s_ep2 = self._uq_bayes_local_posterior_at_mask(
+                            mu0_ws, s_ep0, s_a0,
+                            lat2d, lon2d, mask, [o.copy() for o in obs_mix],
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,  # fallback only
+                        )
+                        mu2_lin = self._uq_mu_from_ws(imtU, mu2_ws)
+                        mean2 = self._uq_agg(mu2_lin[mask], agg=agg_effective)
+                        s_ep2_t = self._uq_agg(s_ep2[mask], agg=agg_effective)
+                        sig2 = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_ep2_t) ** 2)))
+    
+                    rows.append({
+                        "target_id": t.get("id", "GLOBAL"),
+                        "target_type": ttype,
+                        "version": int(v),
+                        "imt": imtU,
+                        "method": "bayes_2lik",
+                        "mean_predicted": float(mean2),
+                        "sigma_total_predicted": float(sig2),
+                        "sigma_epistemic_predicted": float(s_ep2_t),
+                        "sigma_aleatoric_used": float(s_a0_t),
+                        "n_obs_total": int(c_mix.get("total", 0)),
+                        "n_obs_seismic": int(c_mix.get("seismic", 0)),
+                        "n_obs_intensity": int(c_mix.get("intensity", 0)),
+                        "n_obs_unknown": int(c_mix.get("unknown", 0)),
+                        "n_cells": int(n_cells),
+                    })
+    
+                # dyfi_weighted (mixed + meas_var + DYFI weights)
+                if "dyfi_weighted" in compute:
+                    obs_w = _apply_dyfi_weights(obs_mix)
+                    if c_mix.get("total", 0) == 0:
+                        meanw, sigw, s_epw_t = mu0_lin_t, sig0_raw_t, s_ep0_t
+                    else:
+                        muw_ws, s_epw = self._uq_bayes_local_posterior_at_mask(
+                            mu0_ws, s_ep0, s_a0,
+                            lat2d, lon2d, mask, [o.copy() for o in obs_w],
+                            update_radius_km=update_radius_km,
+                            kernel=kernel,
+                            kernel_scale_km=kernel_scale_km,
+                            measurement_sigma=measurement_sigma,  # fallback only
+                        )
+                        muw_lin = self._uq_mu_from_ws(imtU, muw_ws)
+                        meanw = self._uq_agg(muw_lin[mask], agg=agg_effective)
+                        s_epw_t = self._uq_agg(s_epw[mask], agg=agg_effective)
+                        sigw = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_epw_t) ** 2)))
+    
+                    rows.append({
+                        "target_id": t.get("id", "GLOBAL"),
+                        "target_type": ttype,
+                        "version": int(v),
+                        "imt": imtU,
+                        "method": "dyfi_weighted",
+                        "mean_predicted": float(meanw),
+                        "sigma_total_predicted": float(sigw),
+                        "sigma_epistemic_predicted": float(s_epw_t),
+                        "sigma_aleatoric_used": float(s_a0_t),
+                        "n_obs_total": int(c_mix.get("total", 0)),
+                        "n_obs_seismic": int(c_mix.get("seismic", 0)),
+                        "n_obs_intensity": int(c_mix.get("intensity", 0)),
+                        "n_obs_unknown": int(c_mix.get("unknown", 0)),
+                        "n_cells": int(n_cells),
+                    })
+    
+        return pd.DataFrame(rows)
+    
+    
+    def uq_plot_targets_decay(
+        self,
+        *,
+        version_list,
+        imt="MMI",
+        points=None,
+        areas=None,
+        what="sigma_total_predicted",
+        methods=("ShakeMap", "bayes", "bayes_2lik"),
+        agg="mean",
+        global_stat=None,
+        prior_version=None,
+        sigma_total_from_shakemap=True,
+        sigma_aleatory=None,
+        update_radius_km=30.0,
+        kernel="gaussian",
+        kernel_scale_km=20.0,
+        measurement_sigma=0.30,
+        measurement_sigma_instr=None,
+        measurement_sigma_dyfi=None,
+        dyfi_weight_mode="sqrt_nresp",
+        dyfi_w_max=10.0,
+        grid_res=None,
+        interp_method="nearest",
+        interp_kwargs=None,
+        figsize=(10, 5),
+        dpi=150,
+        xrotation=0,
+        title=None,
+        output_path=None,
+        save=True,
+        save_formats=("png",),
+        show=False,
+        plot_combined=True,
+        combined_figsize=(11, 6),
+        combined_legend_ncol=2,
+        audit=True,
+        audit_output_path=None,
+        audit_prefix=None,
+        dyfi_source=None,  # NEW
+    ):
+        """
+        Plot target decay curves for points/areas.
+        """
+        import matplotlib.pyplot as plt
+    
+        imtU = str(imt).upper().strip()
+        versions = sorted([int(v) for v in version_list])
+    
+        df = self.uq_extract_target_series(
+            version_list=versions,
+            imt=imtU,
+            points=points,
+            areas=areas,
+            agg=agg,
+            global_stat=global_stat,
+            sigma_total_from_shakemap=sigma_total_from_shakemap,
+            sigma_aleatory=sigma_aleatory,
+            prior_version=prior_version,
+            update_radius_km=update_radius_km,
+            kernel=kernel,
+            kernel_scale_km=kernel_scale_km,
+            measurement_sigma=measurement_sigma,
+            measurement_sigma_instr=measurement_sigma_instr,
+            measurement_sigma_dyfi=measurement_sigma_dyfi,
+            dyfi_weight_mode=dyfi_weight_mode,
+            dyfi_w_max=dyfi_w_max,
+            grid_res=grid_res,
+            interp_method=interp_method,
+            interp_kwargs=interp_kwargs,
+            methods_to_compute=methods,
+            audit=audit,
+            audit_output_path=audit_output_path,
+            audit_prefix=audit_prefix,
+            dyfi_source=dyfi_source,
+        )
+    
+        targets = sorted(df["target_id"].unique().tolist())
+        for tid in targets:
+            sub = df[(df["target_id"] == tid) & (df["method"].isin(methods))].copy()
+            if sub.empty:
+                continue
+            sub = sub.sort_values(["version", "method"])
+    
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+            for m in methods:
+                s = sub[sub["method"] == m].sort_values("version")
+                if s.empty:
+                    continue
+                ax.plot(s["version"].values, s[what].values, marker="o", linewidth=1.5, label=str(m))
+    
+            ax.set_xlabel("ShakeMap version")
+            ax.set_ylabel(str(what))
+            ax.tick_params(axis="x", rotation=float(xrotation))
+            ax.grid(True, alpha=0.3)
+    
+            ttl = title if title is not None else f"{imtU} target decay @ {tid} ({what})"
+            ax.set_title(ttl)
+            ax.legend()
+    
+            fig.tight_layout()
+            if save and (output_path is not None):
+                self._uq_save_figure_safe(
+                    fig,
+                    fname_stem=f"UQ-TargetDecay-{tid}-{imtU}-{what}",
+                    subdir="uq_plots/targets_decay",
+                    output_path=output_path,
+                    save_formats=save_formats,
+                    dpi=dpi,
+                )
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)
+    
+        return df
+
+
+
+
 
