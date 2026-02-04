@@ -1,0 +1,55 @@
+########################################
+# SHAKEmap                               
+########################################
+
+#### Figure
+figure.figsize     : 6, 6
+figure.titlesize   : 9
+figure.dpi         : 300
+savefig.dpi        : 300
+savefig.bbox       : tight
+
+#### Fonts (LaTeX-like, no TeX dependency)
+text.usetex        : False
+font.family        : serif
+font.serif         : CMU Serif, Latin Modern Roman, Computer Modern Roman, DejaVu Serif
+mathtext.fontset   : cm
+
+#### Axes
+axes.titlesize     : 9
+axes.titlepad      : 40
+axes.labelsize     : 12
+axes.labelcolor    : black
+axes.labelweight   : normal
+axes.grid          : True
+axes.axisbelow     : True
+
+#### Ticks
+xtick.labelsize    : 12
+ytick.labelsize    : 12
+xtick.direction    : out
+ytick.direction    : out
+
+#### Legend
+legend.fontsize        : 8
+legend.title_fontsize  : 8
+legend.loc             : best
+
+#### Lines
+lines.linewidth    : 1.2
+lines.markersize   : 6
+
+#### Grid
+grid.linestyle     : --
+grid.color         : 0.7
+grid.linewidth     : 0.4
+grid.alpha         : 0.7
+
+#### Spines
+axes.spines.top    : False
+axes.spines.right  : False
+
+#### Formatter
+axes.formatter.useoffset     : False
+axes.formatter.use_mathtext  : True
+axes.formatter.limits        : -4, 4

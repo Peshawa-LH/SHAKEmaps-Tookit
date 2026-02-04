@@ -1,0 +1,54 @@
+# Custom Matplotlib style with LaTeX-style font (DejaVu Serif)
+#### Figure
+figure.figsize   : 12, 7
+figure.titlesize : 20
+
+#### Fonts (safe, LaTeX-like)
+text.usetex : False
+font.family : serif
+
+# Use Computer Modern for math without LaTeX
+mathtext.fontset : cm
+
+# Optional: make normal text also look Computer-Modern-ish if available
+# (Matplotlib bundles/ships CM-like fonts in many installs; if not found, it will fall back gracefully)
+font.serif : Computer Modern Roman, CMU Serif, Latin Modern Roman, DejaVu Serif
+
+#### Axes
+axes.titlesize   : 20
+axes.labelsize   : 30
+axes.labelcolor  : black
+axes.labelweight : normal
+axes.grid        : True
+axes.axisbelow   : True
+
+#### Lines
+lines.linewidth  : 2
+lines.markersize : 10
+
+#### Legend
+legend.fontsize       : 20
+legend.title_fontsize : 20
+legend.loc            : best
+
+#### Grid
+grid.color     : gray
+grid.linestyle : --
+grid.linewidth : 0.3
+grid.alpha     : 0.7
+
+#### Ticks
+xtick.labelsize : 30
+ytick.labelsize : 30
+xtick.direction : out
+ytick.direction : out
+
+#### Formatter (reduce scientific notation)
+axes.formatter.useoffset    : False
+axes.formatter.use_mathtext : False
+axes.formatter.limits       : -100, 100
+
+#### Savefig (safer for LaTeX documents)
+savefig.dpi    : 300
+savefig.format : png
+savefig.bbox   : tight

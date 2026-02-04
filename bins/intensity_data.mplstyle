@@ -1,0 +1,64 @@
+#### Figure
+figure.figsize   : 12, 7
+figure.titlesize : 20
+
+#### Font (safe LaTeX-like)
+text.usetex  : False
+font.family  : serif
+
+# Prefer Latin Modern / Computer Modern-like fonts if installed, otherwise fall back safely
+font.serif   : Latin Modern Roman, Computer Modern Roman, CMU Serif, DejaVu Serif
+
+# Keep weights light (critical for “not bold” look)
+font.weight        : normal
+axes.titleweight   : normal
+axes.labelweight   : normal
+
+# Math to look like LaTeX
+mathtext.fontset   : cm
+mathtext.default   : regular
+
+#### Axes
+axes.titlesize   : 20
+axes.labelsize   : 20
+axes.labelcolor  : black
+axes.grid        : True
+axes.axisbelow   : True
+
+#### Lines
+lines.linewidth   : 2
+lines.markersize  : 7
+
+#### Legend
+legend.fontsize        : 20
+legend.title_fontsize  : 20
+legend.loc             : best
+legend.frameon         : True
+
+
+
+#### Grid (match earlier “safe LaTeX-like” look)
+grid.color      : gray
+grid.linestyle  : --
+grid.linewidth  : 0.3
+grid.alpha      : 0.7
+
+#### Ticks
+xtick.labelsize : 55
+ytick.labelsize : 55
+xtick.direction : out
+ytick.direction : out
+xtick.major.width : 1.0
+ytick.major.width : 1.0
+
+#### Formatter (reduce scientific notation)
+axes.formatter.useoffset    : False
+axes.formatter.use_mathtext : False
+axes.formatter.limits       : -100, 100
+
+#### Savefig (better for LaTeX inclusion)
+savefig.dpi     : 300
+savefig.format  : pdf
+savefig.bbox    : tight
+
+

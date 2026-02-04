@@ -1,0 +1,37 @@
+#### Figure
+figure.figsize   : 8, 6    # figure size in inches
+figure.dpi       : 100     # figure dots per inch
+
+#### Axes
+axes.titlesize   : 24      # font size of the axes title
+axes.labelsize   : 20      # font size of the x and y labels
+axes.labelcolor  : black   # color of the axis labels
+axes.labelweight : normal  # weight of the axis labels
+
+#### Lines
+lines.linewidth   : 3      # line width in points
+lines.markersize  : 10     # marker size in points
+
+#### Legend
+legend.fontsize : 16       # legend font size
+legend.loc      : upper right  # legend location
+
+#### Grid
+grid.color      : gray       # grid color
+grid.linestyle  : dashed     # dotted
+grid.linewidth  : 0.5        # in points
+
+#### Font
+font.size       : 16          # font size in points
+font.family     : sans-serif  # font family
+
+#### Ticks
+xtick.labelsize : 16  # font size of the tick labels
+ytick.labelsize : 16  # font size of the tick labels
+xtick.direction : out # direction: in, out, or inout
+ytick.direction : out # direction: in, out, or inout
+
+#### Savefig
+savefig.dpi       : 100      # figure dots per inch
+savefig.format    : png      # png, ps, pdf, svg
+savefig.bbox      : standard # 'tight' or 'standard'

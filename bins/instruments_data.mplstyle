@@ -1,0 +1,55 @@
+#### Instruments Data Figure Styling v26.1
+
+#### Figure
+figure.figsize   : 6, 4
+figure.titlesize : 10
+
+#### Fonts (safe, LaTeX-like)
+text.usetex : False
+font.family : serif
+
+# Use Computer Modern for math without LaTeX
+mathtext.fontset : cm
+
+# Optional: make normal text also look Computer-Modern-ish if available
+# (Matplotlib bundles/ships CM-like fonts in many installs; if not found, it will fall back gracefully)
+font.serif : Computer Modern Roman, CMU Serif, Latin Modern Roman, DejaVu Serif
+
+#### Axes
+axes.titlesize   : 18
+axes.labelsize   : 18
+axes.labelcolor  : black
+axes.labelweight : normal
+axes.grid        : True
+axes.axisbelow   : True
+
+#### Lines
+lines.linewidth  : 2
+lines.markersize : 7
+
+#### Legend
+legend.fontsize       : 10
+legend.title_fontsize : 10
+legend.loc            : best
+
+#### Grid
+grid.color     : gray
+grid.linestyle : --
+grid.linewidth : 0.3
+grid.alpha     : 0.7
+
+#### Ticks
+xtick.labelsize : 20
+ytick.labelsize : 20
+xtick.direction : out
+ytick.direction : out
+
+#### Formatter (reduce scientific notation)
+axes.formatter.useoffset    : False
+axes.formatter.use_mathtext : False
+axes.formatter.limits       : -100, 100
+
+#### Savefig (safer for LaTeX documents)
+savefig.dpi    : 300
+savefig.format : png
+savefig.bbox   : tight

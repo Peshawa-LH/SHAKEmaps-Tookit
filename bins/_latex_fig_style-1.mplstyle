@@ -1,0 +1,34 @@
+# Custom Matplotlib style with LaTeX-style font (DejaVu Serif)
+figure.figsize: 24, 12
+
+font.family: serif
+font.serif: DejaVu Serif
+text.usetex: False
+
+# Font and axis sizes
+axes.titlesize: 500          # Title font size
+axes.titlepad: 75           # Title padding (new setting added)
+axes.labelsize: 25          # X and Y axis label sizes
+xtick.labelsize: 30         # X-tick label size
+ytick.labelsize: 30         # Y-tick label size (updated from 11)
+
+# Legend configuration
+legend.fontsize: 100         # Legend font size
+legend.title_fontsize: 100   # Legend title font size
+
+# Figure resolution
+figure.titlesize: 14        # Unchanged (figure-level title size, optional use)
+figure.dpi: 150
+savefig.dpi: 500
+
+# Grid and visual styles
+axes.grid: True
+grid.linestyle: --
+grid.color: 0.8
+lines.linewidth: 2
+
+# Spines and tick directions
+axes.spines.top: False
+axes.spines.right: False
+xtick.direction: out
+ytick.direction: out

@@ -1,0 +1,10 @@
+# SHAKEmaps version 26.1 Latex Font 
+
+
+font.family: serif
+font.serif: DejaVu Serif
+text.usetex: False
+mathtext.fontset: stix
+mathtext.rm: STIXGeneral
+mathtext.it: STIXGeneral:italic
+mathtext.bf: STIXGeneral:bold

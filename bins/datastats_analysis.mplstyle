@@ -1,0 +1,52 @@
+########################################
+# Instruments Data Figure Styling v26.1 (CLEAN)
+# Goal: LaTeX-like look WITHOUT requiring LaTeX
+########################################
+
+#### Figure
+figure.figsize        : 6, 4
+figure.titlesize      : 10
+savefig.dpi           : 300
+savefig.format        : png
+savefig.bbox          : tight
+
+#### Fonts (LaTeX-like without TeX)
+text.usetex           : False
+font.family           : serif
+# Prefer CMU/Latin Modern/Computer Modern; fall back safely
+font.serif            : CMU Serif, Latin Modern Roman, Computer Modern Roman, DejaVu Serif
+mathtext.fontset      : cm
+
+#### Axes
+axes.titlesize        : 18
+axes.labelsize        : 18
+axes.labelcolor       : black
+axes.labelweight      : normal
+axes.grid             : True
+axes.axisbelow        : True
+
+#### Lines
+lines.linewidth       : 2
+lines.markersize      : 7
+
+#### Legend
+legend.fontsize       : 9
+legend.title_fontsize : 9
+legend.loc            : best
+
+#### Grid
+grid.color            : gray
+grid.linestyle        : --
+grid.linewidth        : 0.3
+grid.alpha            : 0.7
+
+#### Ticks
+xtick.labelsize       : 18
+ytick.labelsize       : 18
+xtick.direction       : out
+ytick.direction       : out
+
+#### Formatter (reduce scientific notation, keep sane defaults)
+axes.formatter.useoffset     : False
+axes.formatter.use_mathtext  : True
+axes.formatter.limits        : -4, 4
