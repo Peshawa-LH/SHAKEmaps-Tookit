@@ -98,6 +98,8 @@ from modules.SHAKEtools import *
 from modules.SHAKEgmice import *
 
 
+from hashlib import md5 as _md5
+
 try:
     from modules.SHAKEtime import *
 except Exception:
