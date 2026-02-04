@@ -8896,6 +8896,36 @@ class SHAKEuq:
             return "cdi"
         return "stationlist"
 
+    def _select_intensity_obs(self, version, dyfi_source, obs_pool, allow_fallback=True):
+        """
+        Select intensity observations for a version based on dyfi_source routing.
+        Returns (obs_intensity, chosen_source).
+        """
+        mode = dyfi_source if dyfi_source is not None else getattr(self, "dyfi_source", "stationlist")
+        mode = str(mode).lower().strip()
+        stationlist_obs = (obs_pool or {}).get("obs_intensity_stationlist", []) or []
+        cdi_obs = (obs_pool or {}).get("obs_intensity_cdi", []) or []
+
+        if mode == "stationlist":
+            return stationlist_obs, "stationlist"
+
+        if mode == "cdi":
+            if cdi_obs:
+                return cdi_obs, "cdi"
+            if allow_fallback and stationlist_obs:
+                return stationlist_obs, "stationlist"
+            return [], "cdi"
+
+        # auto: stationlist until CDI becomes available for this version
+        cdi_ready = int(version) >= int(getattr(self, "cdi_attach_from_version", 4))
+        if cdi_ready and cdi_obs:
+            return cdi_obs, "cdi"
+        if stationlist_obs:
+            return stationlist_obs, "stationlist"
+        if allow_fallback and cdi_obs:
+            return cdi_obs, "cdi"
+        return [], "stationlist"
+
 
     def _uq_obs_audit_summary(self, obs_list):
         import numpy as np
@@ -8952,11 +8982,11 @@ class SHAKEuq:
         if obs_pool is None:
             return [], {"total": 0, "seismic": 0, "intensity": 0, "unknown": 0}
 
-        dyfi_src_eff = self._uq_select_dyfi_source_for_version(v, dyfi_source=dyfi_source)
-        intensity_obs = (
-            obs_pool.get("obs_intensity_cdi", [])
-            if dyfi_src_eff == "cdi"
-            else obs_pool.get("obs_intensity_stationlist", [])
+        intensity_obs, dyfi_src_eff = self._select_intensity_obs(
+            v,
+            dyfi_source=dyfi_source,
+            obs_pool=obs_pool,
+            allow_fallback=True,
         )
         seismic_obs = obs_pool.get("obs_seismic", [])
 
@@ -9332,6 +9362,11 @@ class SHAKEuq:
         measurement_sigma=0.30,
         measurement_sigma_instr=None,
         measurement_sigma_dyfi=None,
+        ok_range_km=60.0,
+        ok_variogram="exponential",
+        ok_nugget=1e-6,
+        ok_sill=None,
+        ok_cap_sigma_to_prior=True,
         # dyfi weighting method
         dyfi_weight_mode="sqrt_nresp",
         dyfi_w_max=10.0,
@@ -9354,10 +9389,12 @@ class SHAKEuq:
           - bayes: v0 prior + prefer_domain=True obs
           - bayes_2lik: v0 prior + prefer_domain=False obs + meas_var if present
           - dyfi_weighted: bayes_2lik + DYFI weights (nresp-based) on intensity points
+          - kriging: ordinary kriging on residuals in working space
           - dyfi_source: stationlist | cdi | auto
         """
         import numpy as np
         import pandas as pd
+        logger = logging.getLogger(__name__)
     
         def _norm_method(m):
             s = str(m).strip()
@@ -9585,6 +9622,55 @@ class SHAKEuq:
                         "n_obs_seismic": int(c_w.get("seismic", 0)),
                         "n_obs_intensity": int(c_w.get("intensity", 0)),
                         "n_obs_unknown": int(c_w.get("unknown", 0)),
+                        "n_cells": int(n_cells),
+                    })
+
+                # kriging (residual kriging in working space)
+                if "kriging" in compute:
+                    audit_krig = self._uq_obs_audit_summary(obs_mix)
+                    logger.info(
+                        "[UQ KRIGING] v=%s imt=%s n_obs=%s domains=%s variogram=%s range_km=%s nugget=%s sill=%s",
+                        int(v),
+                        imtU,
+                        int(c_mix.get("total", 0)),
+                        audit_krig.get("counts_by_domain"),
+                        ok_variogram,
+                        float(ok_range_km),
+                        float(ok_nugget),
+                        "auto" if ok_sill is None else float(ok_sill),
+                    )
+                    if c_mix.get("total", 0) == 0:
+                        meank, sigk, s_epk_t = mu0_lin_t, sig0_raw_t, s_ep0_t
+                    else:
+                        muk_ws, s_epk = self._uq_ok_residual_posterior_at_mask(
+                            mu0_ws, s_ep0, s_a0,
+                            lat2d, lon2d, mask, [o.copy() for o in obs_mix],
+                            variogram=ok_variogram,
+                            range_km=ok_range_km,
+                            nugget=ok_nugget,
+                            sill=ok_sill,
+                            measurement_sigma=measurement_sigma,
+                            sigma_ep_cap_to_prior=ok_cap_sigma_to_prior,
+                        )
+                        muk_lin = self._uq_mu_from_ws(imtU, muk_ws)
+                        meank = self._uq_agg(muk_lin[mask], agg=agg_effective)
+                        s_epk_t = self._uq_agg(s_epk[mask], agg=agg_effective)
+                        sigk = float(np.sqrt(max(0.0, float(s_a0_t) ** 2 + float(s_epk_t) ** 2)))
+
+                    rows.append({
+                        "target_id": t.get("id", "GLOBAL"),
+                        "target_type": ttype,
+                        "version": int(v),
+                        "imt": imtU,
+                        "method": "kriging",
+                        "mean_predicted": float(meank),
+                        "sigma_total_predicted": float(sigk),
+                        "sigma_epistemic_predicted": float(s_epk_t),
+                        "sigma_aleatoric_used": float(s_a0_t),
+                        "n_obs_total": int(c_mix.get("total", 0)),
+                        "n_obs_seismic": int(c_mix.get("seismic", 0)),
+                        "n_obs_intensity": int(c_mix.get("intensity", 0)),
+                        "n_obs_unknown": int(c_mix.get("unknown", 0)),
                         "n_cells": int(n_cells),
                     })
     
