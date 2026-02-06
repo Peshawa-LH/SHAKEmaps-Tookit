@@ -96,6 +96,7 @@ from modules.SHAKEparser import *
 from modules.SHAKEmapper import *
 from modules.SHAKEtools import *
 from modules.SHAKEgmice import *
+from modules.SHAKEdataset import SHAKEdataset
 
 
 from hashlib import md5 as _md5
@@ -1377,318 +1378,86 @@ class SHAKEuq:
         output_units: dict = None,
     ):
         """
-        DATASET BUILDER (v26.5 path-policy patch)
-    
-        Path policy enforced:
-          - Dataset base is ALWAYS: <base_folder>/SHAKEuq/<event_id>
-            unless base_folder already includes SHAKEuq or already points to <event_id>.
-          - If user passes "./export" -> "./export/SHAKEuq/<event_id>"
-          - If user passes "./export/SHAKEuq" -> "./export/SHAKEuq/<event_id>"
-          - If user passes ".../<event_id>" (already final) -> keep as is
-          - export flag controls writing, NOT the location.
-    
-        Everything else is identical to your current builder.
+        Dataset builder delegated to SHAKEdataset while keeping API stable.
         """
-        import numpy as np
-        import json
-        from pathlib import Path
-        import warnings
-    
-        # ---------------------------
-        # Normalize inputs
-        # ---------------------------
-        version_list = [int(v) for v in list(version_list)]
-        interp_kwargs = {} if interp_kwargs is None else dict(interp_kwargs)
-    
-        # ---------------------------
-        # PATH POLICY (THE FIX)
-        # ---------------------------
-        bf = Path(base_folder).expanduser()
-    
-        # Case A: user already passed ".../<event_id>" (final dataset folder)
-        # Accept it as-is to avoid duplicating event_id/uq.
-        if bf.name == "uq" and bf.parent.name == str(event_id):
-            base = bf
-    
-        # Case B: user passed something that already ends with ".../SHAKEuq"
-        # -> append <event_id>
-        elif bf.name.lower() == "SHAKEuq":
-            base = bf / str(event_id) / "uq"
-    
-        else:
-            # Case C: user passed a folder that already contains a "SHAKEuq" segment somewhere
-            # (e.g., "/data/project/export/SHAKEuq/runs")
-            parts_lower = [p.lower() for p in bf.parts]
-            if "SHAKEuq" in parts_lower:
-                base = bf / str(event_id) / "uq"
-            else:
-                # Case D: default - inject SHAKEuq
-                base = bf / "SHAKEuq" / str(event_id) / "uq"
-    
-        base = self._uq_ensure_dir(base)
-    
-        # ---------------------------
-        # IMT discovery / requested
-        # ---------------------------
-        per_avail = self.uq_list_available_imts(
-            version_list, stations_folder=stations_folder, rupture_folder=rupture_folder
+        dataset_builder = SHAKEdataset(
+            event_id=event_id,
+            event_time=self.event_time,
+            shakemap_folder=self.shakemap_folder,
+            rupture_folder=rupture_folder or self.rupture_folder,
+            stations_folder=stations_folder or self.stations_folder,
+            dyfi_cdi_file=self.dyfi_cdi_file,
+            version_list=version_list,
+            include_cdi_from_version=getattr(self, "cdi_attach_from_version", 4),
+            base_folder=base_folder,
+            verbose=True,
+            dyfi_source=getattr(self, "dyfi_source", "stationlist"),
+            dyfi_cdi_max_dist_km=getattr(self, "dyfi_cdi_max_dist_km", 400.0),
+            dyfi_cdi_min_nresp=getattr(self, "dyfi_cdi_min_nresp", 1),
+            dyfi_weight_rule=getattr(self, "dyfi_weight_rule", "nresp_threshold"),
+            dyfi_weight_threshold=getattr(self, "dyfi_weight_threshold", 3),
+            dyfi_weight_low=getattr(self, "dyfi_weight_low", 1.0),
+            dyfi_weight_high=getattr(self, "dyfi_weight_high", 2.0),
+            dyfi_weight_max=getattr(self, "dyfi_weight_max", 10.0),
         )
-        global_imts = sorted({k for vv in per_avail.values() for k in vv})
-        requested = self._uq_expand_requested_imts(imts, global_imts)
-    
-        versions_raw = {}
-        file_traces = {}
-        sanity_rows = []
-        obs_by_version = {}
-        cdi_df = self._uq_load_dyfi_cdi_df() if getattr(self, "dyfi_cdi_file", None) else None
-    
-        for v in version_list:
-            grid_path, unc_path, st_path, rup_path, trace = self._uq_resolve_paths(
-                v, stations_folder=stations_folder, rupture_folder=rupture_folder
-            )
-            file_traces[v] = trace
-    
-            raw = {
-                "version": v,
-                "grid_path": str(grid_path),
-                "unc_path": str(unc_path) if unc_path is not None else "",
-                "station_path": str(st_path),
-                "rupture_path": str(rup_path),
-                "grid_spec": None,
-                "mean_fields": {},
-                "mean_units": {},
-                "sigma_fields_xml": {},   # XML names (STDPGA...)
-                "sigma_units_xml": {},
-                "sigma_fields": {},       # mapped IMT names (PGA...)
-                "sigma_units": {},
-                "vs30": None,
-                "lats_1d": None,
-                "lons_1d": None,
-                "stations": {"instrumented": [], "dyfi": []},
-                "counts": {"n_instrumented": 0, "n_dyfi": 0},
-                "station_parse_debug": {},
-                "rupture_loaded": bool(rup_path.exists()),
-                "uncertainty_xml_exists": bool(unc_path is not None and Path(unc_path).exists()),
-                "stationlist_exists": bool(Path(st_path).exists()),
-            }
-    
-            # grid.xml
-            if Path(grid_path).exists():
-                spec, mean_fields, vs30, mean_units = self._uq_parse_grid_xml(grid_path)
-                raw["grid_spec"] = spec
-                raw["mean_fields"] = mean_fields
-                raw["mean_units"] = mean_units or {}
-                raw["vs30"] = vs30
-                lats, lons = self._uq_axes_from_spec(spec)
-                raw["lats_1d"] = lats
-                raw["lons_1d"] = lons
-            else:
-                warnings.warn(f"[UQ] Missing grid XML for v{v}: {grid_path}")
-    
-            # uncertainty.xml
-            if raw["uncertainty_xml_exists"]:
-                try:
-                    _, sig_fields_xml, sig_units_xml = self._uq_parse_uncertainty_xml(unc_path)
-                    raw["sigma_fields_xml"] = sig_fields_xml or {}
-                    raw["sigma_units_xml"] = sig_units_xml or {}
-    
-                    mapped = {}
-                    mapped_units = {}
-                    for sf_name, sf_grid in raw["sigma_fields_xml"].items():
-                        imt_name = self._uq_sigma_field_to_imt(sf_name)
-                        mapped[str(imt_name)] = sf_grid
-                        if sf_name in raw["sigma_units_xml"]:
-                            mapped_units[str(imt_name)] = raw["sigma_units_xml"][sf_name]
-                    raw["sigma_fields"] = mapped
-                    raw["sigma_units"] = mapped_units
-    
-                except Exception as e:
-                    warnings.warn(f"[UQ] Failed parsing uncertainty XML for v{v}: {e}")
-                    raw["sigma_fields_xml"] = {}
-                    raw["sigma_units_xml"] = {}
-                    raw["sigma_fields"] = {}
-                    raw["sigma_units"] = {}
-    
-            # Ensure requested sigma exists (defaults if missing)
-            for imt in requested:
-                if imt not in raw["sigma_fields"]:
-                    m = raw["mean_fields"].get(imt, None)
-                    raw["sigma_fields"][imt] = self._uq_default_sigma_for_imt(imt, m)
-                    if imt not in raw["sigma_units"]:
-                        raw["sigma_units"][imt] = None
-    
-            # stationlist.json
-            if raw["stationlist_exists"]:
-                try:
-                    inst, dyfi, dbg = self._uq_parse_stationlist_with_usgsparser(st_path)
-                    raw["stations"]["instrumented"] = inst
-                    raw["stations"]["dyfi"] = dyfi
-                    raw["counts"]["n_instrumented"] = int(len(inst))
-                    raw["counts"]["n_dyfi"] = int(len(dyfi))
-                    raw["station_parse_debug"] = dbg
-                except Exception as e:
-                    warnings.warn(f"[UQ] Stationlist parsing failed for v{v}: {e}")
-
-            versions_raw[v] = raw
-            obs_by_version[v] = self._uq_build_obs_pool_for_version(int(v), raw, cdi_df=cdi_df)
-
-            sanity_rows.append(
-                {
-                    "version": v,
-                    "grid_shape": None if raw["grid_spec"] is None else (raw["grid_spec"]["nlat"], raw["grid_spec"]["nlon"]),
-                    "n_instrumented": raw["counts"]["n_instrumented"],
-                    "n_dyfi": raw["counts"]["n_dyfi"],
-                    "rupture_loaded": raw["rupture_loaded"],
-                    "uncertainty_xml_exists": raw["uncertainty_xml_exists"],
-                    "stationlist_exists": raw["stationlist_exists"],
-                    "aligned_to_unified": False,
-                    "pga_df_rows": raw.get("station_parse_debug", {}).get("pga_df_rows", 0),
-                    "pga_rows_after_lonlat_filter": raw.get("station_parse_debug", {}).get("pga_rows_after_lonlat_filter", 0),
-                    "pga_rows_after_value_filter": raw.get("station_parse_debug", {}).get("pga_rows_after_value_filter", 0),
-                    "pgv_df_rows": raw.get("station_parse_debug", {}).get("pgv_df_rows", 0),
-                    "sa_df_rows": raw.get("station_parse_debug", {}).get("sa_df_rows", 0),
-                    "mmi_df_rows": raw.get("station_parse_debug", {}).get("mmi_df_rows", 0),
-                    "mmi_rows_after_lonlat_filter": raw.get("station_parse_debug", {}).get("mmi_rows_after_lonlat_filter", 0),
-                    "mmi_rows_after_intensity_filter": raw.get("station_parse_debug", {}).get("mmi_rows_after_intensity_filter", 0),
-                    "station_parse_note": raw.get("station_parse_debug", {}).get("note", ""),
-                    "mean_units_keys": sorted(list((raw.get("mean_units") or {}).keys())),
-                    "sigma_units_keys": sorted(list((raw.get("sigma_units") or {}).keys())),
-                }
-            )
-    
-        specs = [versions_raw[v]["grid_spec"] for v in version_list if versions_raw[v]["grid_spec"] is not None]
-        if not specs:
-            raise FileNotFoundError("[UQ] No grid XML found across versions; cannot build dataset.")
-    
-        unified_spec = self._uq_build_unified_spec(specs, grid_unify=grid_unify, resolution=resolution)
-        ulats_1d, ulons_1d = self._uq_axes_from_spec(unified_spec)
-        ULON2, ULAT2 = np.meshgrid(ulons_1d, ulats_1d)
-    
-        unified = {}
-        for v in version_list:
-            raw = versions_raw[v]
-            if raw["grid_spec"] is None:
-                continue
-    
-            slats = np.asarray(raw["lats_1d"], dtype=float)
-            slons = np.asarray(raw["lons_1d"], dtype=float)
-    
-            uv = {
-                "version": v,
-                "unified_mean": {},
-                "unified_sigma_prior_total": {},
-                "unified_vs30": None,
-                "aligned_to_unified": True,
-                "unified_mean_units": dict(raw.get("mean_units") or {}),
-                "unified_sigma_units": dict(raw.get("sigma_units") or {}),
-                "interp_method": str(interp_method),
-            }
-    
-            # vs30
-            if raw["vs30"] is not None:
-                uv["unified_vs30"] = self._uq_interp_to_unified(
-                    slats, slons, raw["vs30"], ULAT2, ULON2, method=interp_method, **interp_kwargs
-                )
-            else:
-                uv["unified_vs30"] = np.full((unified_spec["nlat"], unified_spec["nlon"]), np.nan, dtype=float)
-    
-            # fields
-            for imt in requested:
-                if imt in raw["mean_fields"]:
-                    uv["unified_mean"][imt] = self._uq_interp_to_unified(
-                        slats, slons, raw["mean_fields"][imt], ULAT2, ULON2, method=interp_method, **interp_kwargs
-                    )
-                else:
-                    uv["unified_mean"][imt] = np.full((unified_spec["nlat"], unified_spec["nlon"]), np.nan, dtype=float)
-    
-                sig = raw["sigma_fields"].get(imt, None)
-                if sig is None:
-                    uv["unified_sigma_prior_total"][imt] = self._uq_default_sigma_for_imt(imt, uv["unified_mean"][imt])
-                elif isinstance(sig, (float, int)):
-                    uv["unified_sigma_prior_total"][imt] = np.full((unified_spec["nlat"], unified_spec["nlon"]), float(sig), dtype=float)
-                else:
-                    sig = np.asarray(sig, dtype=float)
-                    if sig.shape == (raw["grid_spec"]["nlat"], raw["grid_spec"]["nlon"]):
-                        uv["unified_sigma_prior_total"][imt] = self._uq_interp_to_unified(
-                            slats, slons, sig, ULAT2, ULON2, method=interp_method, **interp_kwargs
-                        )
-                    elif sig.shape == (unified_spec["nlat"], unified_spec["nlon"]):
-                        uv["unified_sigma_prior_total"][imt] = sig
-                    else:
-                        uv["unified_sigma_prior_total"][imt] = np.full(
-                            (unified_spec["nlat"], unified_spec["nlon"]), float(np.nanmedian(sig)), dtype=float
-                        )
-    
-            unified[v] = uv
-            for row in sanity_rows:
-                if row["version"] == v:
-                    row["aligned_to_unified"] = True
-    
-        if export:
-            with open(base / "uq_unified_grid_spec.json", "w", encoding="utf-8") as f:
-                json.dump(unified_spec, f, indent=2)
-    
-            np.savez_compressed(
-                base / "uq_unified_axes.npz",
-                lats_1d=ulats_1d,
-                lons_1d=ulons_1d,
-                lat2d=ULAT2,
-                lon2d=ULON2,
-            )
-    
-            for v, uv in unified.items():
-                vdir = self._uq_ensure_dir(base / f"v{int(v)}")
-                np.savez_compressed(vdir / "uq_unified_mean.npz", **{k: uv["unified_mean"][k] for k in uv["unified_mean"]})
-                np.savez_compressed(
-                    vdir / "uq_unified_sigma_prior_total.npz",
-                    **{k: uv["unified_sigma_prior_total"][k] for k in uv["unified_sigma_prior_total"]},
-                )
-                np.savez_compressed(vdir / "uq_unified_vs30.npz", vs30=uv["unified_vs30"])
-    
-                with open(vdir / "uq_unified_units.json", "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "mean_units": uv.get("unified_mean_units", {}),
-                            "sigma_units": uv.get("unified_sigma_units", {}),
-                            "interp_method": uv.get("interp_method", None),
-                        },
-                        f,
-                        indent=2,
-                    )
-    
-            with open(base / "uq_file_trace.json", "w", encoding="utf-8") as f:
-                json.dump(file_traces, f, indent=2)
-    
-            with open(base / "uq_sanity_table.json", "w", encoding="utf-8") as f:
-                json.dump(sanity_rows, f, indent=2)
-    
-            if output_units is not None:
-                with open(base / "uq_output_units_requested.json", "w", encoding="utf-8") as f:
-                    json.dump(dict(output_units), f, indent=2)
-    
-        self.uq_state = {
-            "event_id": str(event_id),
-            "version_list": version_list,
-            "requested_imts": requested,
-            "per_version_available_imts": per_avail,
-            "unified_spec": unified_spec,
-            "unified_axes": {"lats_1d": ulats_1d, "lons_1d": ulons_1d, "lat2d": ULAT2, "lon2d": ULON2},
-            "versions_raw": versions_raw,
-            "versions_unified": unified,
-            "obs_by_version": obs_by_version,
-            "sanity_rows": sanity_rows,
-            "file_traces": file_traces,
-    
-            # NOTE: base is the FULL dataset folder (ends with .../<event_id>)
-            "base_folder": str(base),
-    
-            "stations_folder_used": str(stations_folder) if stations_folder is not None else None,
-            "rupture_folder_used": str(rupture_folder) if rupture_folder is not None else None,
-            "interp_method": str(interp_method),
-            "interp_kwargs": dict(interp_kwargs),
-            "output_units_requested": dict(output_units) if output_units is not None else None,
-        }
+        ds_state = dataset_builder.build(
+            version_list=version_list,
+            base_folder=base_folder,
+            stations_folder=stations_folder,
+            rupture_folder=rupture_folder,
+            imts=imts,
+            grid_unify=grid_unify,
+            resolution=resolution,
+            export=export,
+            interp_method=interp_method,
+            interp_kwargs=interp_kwargs,
+            output_units=output_units,
+        )
+        self.uq_state = self._uq__coerce_dataset_state(ds_state)
         return self.uq_state
+
+    def _uq__coerce_dataset_state(self, ds_state):
+        """
+        Compatibility shim for dataset states built by SHAKEdataset.
+        Ensures legacy keys exist for downstream UQ methods.
+        """
+        if ds_state is None:
+            return None
+        state = dict(ds_state)
+        state.setdefault("event_id", str(getattr(self, "event_id", "")))
+        state.setdefault("version_list", [])
+        state.setdefault("requested_imts", [])
+        state.setdefault("per_version_available_imts", {})
+        state.setdefault("unified_spec", {})
+        state.setdefault("unified_axes", {})
+        state.setdefault("versions_raw", {})
+        state.setdefault("versions_unified", {})
+        state.setdefault("obs_by_version", {})
+        state.setdefault("sanity_rows", [])
+        state.setdefault("file_traces", {})
+        state.setdefault("interp_method", "nearest")
+        state.setdefault("interp_kwargs", {})
+        state.setdefault("output_units_requested", None)
+        if "stations_folder_used" not in state:
+            state["stations_folder_used"] = str(getattr(self, "stations_folder", "")) or None
+        if "rupture_folder_used" not in state:
+            state["rupture_folder_used"] = str(getattr(self, "rupture_folder", "")) or None
+        if "base_folder" not in state or not state.get("base_folder"):
+            state["base_folder"] = str(self._uq_uqdir())
+        return state
+
+    def uq_get_dataset_state(self):
+        return getattr(self, "uq_state", None)
+
+    def uq_get_versions(self):
+        if not hasattr(self, "uq_state") or self.uq_state is None:
+            return []
+        return list(self.uq_state.get("version_list", []) or [])
+
+    def uq_get_obs(self, version: int):
+        if not hasattr(self, "uq_state") or self.uq_state is None:
+            return {}
+        return (self.uq_state.get("obs_by_version", {}) or {}).get(int(version), {})
 
     
     
